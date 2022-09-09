@@ -1,0 +1,1269 @@
+####
+library(shinydashboard)
+library(shiny)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(plotly)
+library(shinyWidgets)
+library(zoo)
+library(dbplyr)
+library(DBI)
+library(rlang)
+
+# library(highcharter)
+library(lubridate)
+# library(stringr)
+# library(withr)
+# library(treemap)
+library(DT)
+# library(shinyBS)
+library(data.table)
+library(shinyjs)
+# library(WDI)
+# library(geosphere)
+# library(magrittr)
+library(shinycssloaders)
+options(spinner.color = "#006272")
+# library(timevis)
+country_list <- readRDS('countryList.RDS')
+goods_list_2 <- readRDS('goods_list_2.RDS')
+goods_list_4 <- readRDS('goods_list_4.RDS')
+goods_list_6 <- readRDS('goods_list_6.RDS')
+
+
+header <- dashboardHeader(title = "Header")
+
+sidebar <- dashboardSidebar(
+  div(airMonthpickerInput(
+    inputId = "chosenMonth",
+    label = "Выбранный месяц:",
+    value = as.Date('2022-05-01')
+  )),
+  sidebarMenu(
+    id = 'sidebar',
+    menuItem(
+      "Main Dashboard",
+      tabName = 'dashboard',
+      icon = icon("dashboard")
+    ),
+    menuItem(
+      "Market Intelligence",
+      tabName = 'country_intel',
+      icon = icon('globe')
+    ),
+    div(
+      conditionalPanel("input.sidebar === 'country_intel'",
+                       selectizeInput(
+                         "select_country",
+                         "Select or search for one or multiple markets",
+                         choices =  country_list,
+                         selected = NULL,
+                         width = "200px",
+                         multiple = T
+                       ),
+                       actionButton(
+                         'btn_build_country_report',
+                         paste0('Build Report'),
+                         icon = icon('wrench')
+                       )
+      )
+    ),
+    useShinyjs(),
+    menuItem(
+      "Commodity Intelligence",
+      tabName = 'com_intel',
+      icon = icon("th")
+    ),
+    div(
+      conditionalPanel("input.sidebar === 'com_intel'",
+                       radioButtons("tnvedCheckbox", "Выберите уровень группировки:",
+                                          c("2 знака", "4 знака", "6 знаков")),
+                       selectizeInput(
+                         "select_commodity",
+                         "Select or search for one or multiple commodities",
+                         choices =  goods_list_2,
+                         selected = NULL,
+                         width = "200px",
+                         multiple = T
+                       ),
+                       actionButton(
+                         'btn_build_comm_report',
+                         paste0('Build Report'),
+                         icon = icon('wrench')
+                       )
+      )
+    )
+  )
+)
+
+body <- dashboardBody(tabItems(
+  tabItem(
+    tabName = "dashboard",
+    
+    ## contents for the dashboard tab
+    # 1.1 Export/import board ---------------------------
+    h1("Внешняя торговля России") ,
+    fluidRow(
+      valueBoxOutput("currentMonthEx") %>% withSpinner(),
+      valueBoxOutput("currentMonthIm")
+    ),
+    
+    h1("Темпы прироста, м/м") ,
+    fluidRow(
+      valueBoxOutput("monthgrowthEx") %>% withSpinner(),
+      valueBoxOutput("monthgrowthIm")
+    ),
+    
+    h1("Темпы прироста, г/г") ,
+    fluidRow(
+      valueBoxOutput("yeargrowthEx") %>% withSpinner(),
+      valueBoxOutput("yeargrowthIm")
+    ),
+    
+    fluidRow(plotlyOutput('tradeHistoryPlots'))  %>% withSpinner()
+  ),
+  
+  
+  
+  tabItem(
+    tabName = "country_intel",
+    
+    ## contents for the country_intel tab
+    # 1.1 Export/import board ---------------------------
+    h1("Внешняя торговля России с выбранными странами") ,
+    fluidRow(
+      valueBoxOutput("exactcurrentMonthEx") %>% withSpinner(),
+      valueBoxOutput("exactcurrentMonthIm") 
+    ),
+    
+    h1("Темпы прироста с выбранными странам, м/м") ,
+    fluidRow(
+      valueBoxOutput("exactmonthgrowthEx") %>% withSpinner(),
+      valueBoxOutput("exactmonthgrowthIm")
+    ),
+    
+    h1("Темпы прироста с выбранными странам, г/г") ,
+    fluidRow(
+      valueBoxOutput("exactyeargrowthEx") %>% withSpinner(),
+      valueBoxOutput("exactyeargrowthIm")
+    ),
+    
+    fluidRow(plotlyOutput('exacttradeHistoryPlots')) %>% withSpinner()
+    
+  ),
+  
+    ## contents for the commodity_intel tab
+    # 1.1 Export/import board ---------------------------
+    tabItem(
+      tabName = "com_intel",
+      
+      h1("Внешняя торговля России выбранными товарами") ,
+      fluidRow(
+        valueBoxOutput("tnvedcurrentMonthEx") %>% withSpinner(),
+        valueBoxOutput("tnvedcurrentMonthIm")
+      ),
+      
+      h1("Темпы прироста с выбранными товарами, м/м") ,
+      fluidRow(
+        valueBoxOutput("tnvedmonthgrowthEx") %>% withSpinner(),
+        valueBoxOutput("tnvedmonthgrowthIm")
+      ),
+      
+      h1("Темпы прироста с выбранными товарами, г/г") ,
+      fluidRow(
+        valueBoxOutput("tnvedyeargrowthEx") %>% withSpinner(),
+        valueBoxOutput("tnvedyeargrowthIm") 
+      ),
+      
+      fluidRow(plotlyOutput('tnvedtradeHistoryPlots')) %>% withSpinner()
+    )
+  
+  
+))
+
+
+## ui.R ##
+ui <- dashboardPage(dashboardHeader(),
+                    dashboardSidebar(sidebar),
+                    dashboardBody(
+                      tags$head(
+                        tags$style(HTML('.air-datepicker-global-container {z-index:99999}'))
+                      ),
+                      body))
+
+
+server <- function(input, output) {
+  # df <- read.table('D:/YandexDisk/Mike Zinovenkov/data_processed/ch_full.csv',
+  # fileEncoding = 'UTF-8-BOM', sep=',', dec='.', header = TRUE)
+  # df2 <- read.table('D:/YandexDisk/Mike Zinovenkov/data_processed/india_full.csv',
+  # fileEncoding = 'UTF-8-BOM', sep=',', dec='.', header = TRUE)
+  
+  
+  
+  
+  # df <- read.table('D:/YandexDisk/Mike Zinovenkov/data_processed/data.csv',
+  # fileEncoding = 'UTF-8-BOM', sep=',', dec='.', header = TRUE)
+  
+  #df <- readRDS('D:/YandexDisk/Mike Zinovenkov/data_processed/df-mirror-MikeZinov.RDS') %>%
+  #  filter(PERIOD >= startDate)
+  #df_FTS <- readRDS('D:/YandexDisk/Mike Zinovenkov/data_processed/df-10-znak.RDS') %>%
+  #  filter(PERIOD >= startDate)
+  
+  
+  
+  # раскомментить для макбука
+  
+  # df <- read.table('/Users/mikezinovenkov/Yandex.Disk.localized/Mike Zinovenkov/data_processed/ch_full.csv',
+  #             fileEncoding = 'UTF-8-BOM', sep=',', dec='.', header = TRUE)
+  # df_FTS <- read.table('/Users/mikezinovenkov/Yandex.Disk.localized/Mike Zinovenkov/data_processed/india_full.csv',
+  #             fileEncoding = 'UTF-8-BOM', sep=',', dec='.', header = TRUE)
+  
+  # df <- rbind(df, df2)
+  # df <- df %>%
+  #   mutate(PERIOD = as.Date(PERIOD))
+  
+  #startDate <- as.Date('2014-01-01')
+  #df <- readRDS('/Users/mikezinovenkov/Yandex.Disk.localized/Mike Zinovenkov/data_processed/df-mirror-MikeZinov.RDS') %>%
+  #  filter(PERIOD >= startDate)
+  #df_FTS <- readRDS('/Users/mikezinovenkov/Yandex.Disk.localized/Mike Zinovenkov/data_processed/df-10-znak.RDS') %>%
+  #  filter(PERIOD >= startDate)
+  
+  con <-
+    dbConnect(RSQLite::SQLite(), "df-10-znak.sqlite")
+  df_FTS <- tbl(con, "fts")
+  df <- tbl(con, "mirr")
+  napr <- tbl(con, "napr")
+  strana <- tbl(con, "strana")
+  tnved <- tbl(con, "tnved")
+  edizm <- tbl(con, "edizm")
+  tnved4 <- tbl(con, "tnved4")
+  tnved6 <- tbl(con, "tnved6")
+  tnved2 <- tbl(con, "tnved2")
+  
+  joinTables <- function(df) {
+    df <- df %>%
+      inner_join(napr,
+                 by = c('NAPR' = 'id'),
+                 suffix = c(".x", "")) %>%
+      inner_join(strana,
+                 by = c('STRANA' = 'id'),
+                 suffix = c(".x", "")) %>%
+      inner_join(tnved,
+                 by = c('TNVED' = 'id'),
+                 suffix = c(".x", "")) %>%
+      inner_join(edizm,
+                 by = c('EDIZM' = 'id'),
+                 suffix = c(".x", "")) %>%
+      inner_join(tnved4,
+                 by = c('TNVED4' = 'id'),
+                 suffix = c(".x", "")) %>%
+      inner_join(tnved6,
+                 by = c('TNVED6' = 'id'),
+                 suffix = c(".x", "")) %>%
+      inner_join(tnved2,
+                 by = c('TNVED2' = 'id'),
+                 suffix = c(".x", "")) %>%
+      select(-ends_with(".x"))
+    return(df)
+  }
+  
+  
+  
+  print('Ready')
+  
+  # 0. Calculate share of mirror data in 2021 trade
+  compare21 <- readRDS('tradeShares.RDS')
+  ratioIm <- round(compare21$ratio[1], 1)
+  ratioEx <- round(compare21$ratio[2], 1)
+  
+  
+  # 1. Value Boxes
+  
+  output$currentMonthEx <- renderValueBox({
+
+    currentMonthEx <- joinTables(df) %>%
+      filter(PERIOD == local(as.numeric(input$chosenMonth))) %>%
+      filter(NAPR == 'ЭК') %>%
+      group_by(PERIOD) %>%
+      summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+      collect() %>%
+      mutate(PERIOD = as.Date(PERIOD)) %>%
+      select(STOIM) %>%
+      as.numeric
+    
+    valueBox(
+      paste0('$', format(currentMonthEx / 10 ^ 6, big.mark = ','), " млн"),
+      paste0('Экспорт ', input$chosenMonth),
+      icon = icon('export', lib = 'glyphicon'),
+      color = "green"
+    )
+  })
+  
+  output$currentMonthIm <- renderValueBox({
+ 
+    currentMonthIm <- joinTables(df) %>%
+      filter(PERIOD == local(as.numeric(input$chosenMonth))) %>%
+      filter(NAPR == 'ИМ') %>%
+      group_by(PERIOD) %>%
+      summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+      collect() %>%
+      mutate(PERIOD = as.Date(PERIOD)) %>%
+      select(STOIM) %>%
+      as.numeric
+    
+    valueBox(
+      paste0('$', format(currentMonthIm / 10 ^ 6, big.mark = ','), " млн"),
+      paste0('Импорт ', input$chosenMonth),
+      icon = icon('import', lib = 'glyphicon'),
+      color = "green"
+    )
+  })
+  
+  output$monthgrowthEx <- renderValueBox({
+    monthgrowthEx <- joinTables(df) %>%
+      filter(NAPR == 'ЭК') %>%
+      filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+               PERIOD == local(as.numeric(input$chosenMonth - months(1)))) %>%
+      group_by(PERIOD) %>%
+      summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+      mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+      ungroup() %>%
+      collect() %>%
+      mutate(PERIOD = as.Date(PERIOD)) %>%
+      filter(PERIOD == input$chosenMonth) %>%
+      select(STOIM) %>%
+      as.numeric
+    
+    valueBox(
+      paste0(format(
+        round(monthgrowthEx * 100, 2), big.mark = ','
+      ), " %"),
+      paste0(
+        'Темп роста экспорта ',
+        input$chosenMonth,
+        ' по отношению к ',
+        input$chosenMonth - months(1)
+      ),
+      icon = icon('export', lib = 'glyphicon'),
+      color = "green"
+    )
+  })
+  
+  output$monthgrowthIm <- renderValueBox({
+    monthgrowthIm <- joinTables(df) %>%
+      filter(NAPR == 'ИМ') %>%
+      filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+               PERIOD == local(as.numeric(input$chosenMonth - months(1)))) %>%
+      group_by(PERIOD) %>%
+      summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+      mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+      ungroup() %>%
+      collect() %>%
+      mutate(PERIOD = as.Date(PERIOD)) %>%
+      filter(PERIOD == input$chosenMonth) %>%
+      select(STOIM) %>%
+      as.numeric
+    
+    
+    valueBox(
+      paste0(format(
+        round(monthgrowthIm * 100, 2), big.mark = ','
+      ), " %"),
+      paste0(
+        'Темп роста импорта ',
+        input$chosenMonth,
+        ' по отношению к ',
+        input$chosenMonth - months(1)
+      ),
+      icon = icon('import', lib = 'glyphicon'),
+      color = "green"
+    )
+  })
+  
+  
+  output$yeargrowthEx <- renderValueBox({
+    yeargrowthEx <- joinTables(df) %>%
+      filter(NAPR == 'ЭК') %>%
+      filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+               PERIOD == local(as.numeric(input$chosenMonth - months(12)))) %>%
+      group_by(PERIOD) %>%
+      summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+      mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+      ungroup() %>%
+      collect() %>%
+      mutate(PERIOD = as.Date(PERIOD)) %>%
+      filter(PERIOD == input$chosenMonth) %>%
+      select(STOIM) %>%
+      as.numeric
+    
+    valueBox(
+      paste0(format(
+        round(yeargrowthEx * 100, 2), big.mark = ','
+      ), " %"),
+      paste0(
+        'Темп роста экспорта ',
+        input$chosenMonth,
+        ' по отношению к ',
+        input$chosenMonth - years(1)
+      ),
+      icon = icon('export', lib = 'glyphicon'),
+      color = "green"
+    )
+  })
+  
+  output$yeargrowthIm <- renderValueBox({
+    yeargrowthIm <- joinTables(df) %>%
+      filter(NAPR == 'ИМ') %>%
+      filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+               PERIOD == local(as.numeric(input$chosenMonth - months(12)))) %>%
+      group_by(PERIOD) %>%
+      summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+      mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+      ungroup() %>%
+      collect() %>%
+      mutate(PERIOD = as.Date(PERIOD)) %>%
+      filter(PERIOD == input$chosenMonth) %>%
+      select(STOIM) %>%
+      as.numeric
+    
+    valueBox(
+      paste0(format(
+        round(yeargrowthIm * 100, 2), big.mark = ','
+      ), " %"),
+      paste0(
+        'Темп роста импорта ',
+        input$chosenMonth,
+        ' по отношению к ',
+        input$chosenMonth - years(1)
+      ),
+      icon = icon('import', lib = 'glyphicon'),
+      color = "green"
+    )
+  })
+  
+  print('ValueBoxes ready')
+  # 2. Trade plot
+  # экспорт
+  
+  output$tradeHistoryPlots <- renderPlotly({
+    
+    tradeHistory <- joinTables(df) %>%
+      group_by(PERIOD, NAPR) %>%
+      summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+      collect() %>%
+      mutate(PERIOD = as.Date(PERIOD))
+    
+    FTStradeHistory <- joinTables(df_FTS) %>%
+      group_by(PERIOD, NAPR) %>%
+      summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+      collect() %>%
+      mutate(PERIOD = as.Date(PERIOD))
+    
+    tradeHistoryPlotEx <-
+      tradeHistory %>% 
+      filter(NAPR == 'ЭК') %>%
+      ggplot() +
+      geom_line(aes(
+        x = PERIOD,
+        y = STOIM / 10 ^ 6,
+        text = paste0(
+          'Экспорт, ',
+          'Суммарный',
+          ', ',
+          PERIOD,
+          ': ',
+          round(STOIM / 10 ^ 6, 1),
+          ' млн'
+        )
+      )) +
+      scale_color_discrete(name = '') +
+      geom_line(
+        data = tradeHistory %>%
+          filter(NAPR == 'ЭК') %>%
+          group_by(PERIOD) %>%
+          summarise(TOTAL = sum(STOIM, na.rm = TRUE)),
+        aes(
+          x = PERIOD,
+          y = TOTAL / 10 ^ 6,
+          group = 1,
+          col = 'blue',
+          linetype = 'total',
+          text = paste0(
+            'Суммарный экспорт, ',
+            PERIOD,
+            ': ',
+            round(TOTAL / 10 ^ 6, 1),
+            ' млн'
+          )
+        )
+      ) +
+      scale_linetype_manual(name = '', values = c('total' = "fill")) +
+      xlab('') +
+      ylab('млн $') +
+      theme(legend.position = 'none')
+      
+      FTStradeHistory %>% 
+      filter(NAPR == 'ЭК') %>%
+      ggplot() +
+      geom_line(aes(
+        x = PERIOD,
+        y = STOIM / 10 ^ 6,
+        text = paste0(
+          'Экспорт, ',
+          'Суммарный',
+          ', ',
+          PERIOD,
+          ': ',
+          round(STOIM / 10 ^ 6, 1),
+          ' млн'
+        )
+      )) +
+      scale_color_discrete(name = '') +
+      geom_line(
+        data = FTStradeHistory %>%
+          filter(NAPR == 'ЭК') %>%
+          group_by(PERIOD) %>%
+          summarise(TOTAL = sum(STOIM, na.rm = TRUE)),
+        aes(
+          x = PERIOD,
+          y = TOTAL / 10 ^ 6,
+          group = 1,
+          col = 'blue',
+          linetype = 'total',
+          text = paste0(
+            'Суммарный экспорт, ',
+            PERIOD,
+            ': ',
+            round(TOTAL / 10 ^ 6, 1),
+            ' млн'
+          )
+        )
+      ) +
+      scale_linetype_manual(name = '', values = c('total' = "dashed")) +
+      xlab('') +
+      ylab('млн $') +
+      theme(legend.position = 'none')
+      
+      
+      
+      
+    
+    tradeHistoryPlotIm <-
+      tradeHistory %>% 
+      filter(NAPR == 'ИМ') %>%
+      ggplot() +
+      geom_line(aes(
+        x = PERIOD,
+        y = STOIM / 10 ^ 6,
+        text = paste0(
+          'Импорт, ',
+          'Суммарный',
+          ', ',
+          PERIOD,
+          ': ',
+          round(STOIM / 10 ^ 6, 1),
+          ' млн'
+        )
+      )) +
+      scale_color_discrete(name = '') +
+      geom_line(
+        data = tradeHistory %>%
+          filter(NAPR == 'ИМ') %>%
+          group_by(PERIOD) %>%
+          summarise(TOTAL = sum(STOIM, na.rm = TRUE)),
+        aes(
+          x = PERIOD,
+          y = TOTAL / 10 ^ 6,
+          group = 1,
+          col = 'blue',
+          linetype = 'total',
+          text = paste0(
+            'Суммарный импорт, ',
+            PERIOD,
+            ': ',
+            round(TOTAL / 10 ^ 6, 1),
+            ' млн'
+          )
+        )
+      ) +
+      scale_linetype_manual(name = '', values = c('total' = "fill")) +
+      xlab('') +
+      ylab('млн $') +
+      theme(legend.position = 'none')                   
+    
+    
+    tradeHistoryPlotEx <-
+      ggplotly(tradeHistoryPlotEx, tooltip = 'text') %>%
+      config(displayModeBar = F, locale = 'ru') %>% layout(plot_bgcolor  = "rgba(0, 0, 0, 0)", paper_bgcolor = "rgba(0, 0, 0, 0)") %>%
+      layout(legend = list(
+        orientation = "h",
+        x = 0.3,
+        y = -0.1
+      ))
+    tradeHistoryPlotIm <-
+      ggplotly(tradeHistoryPlotIm, tooltip = 'text') %>%
+      config(displayModeBar = F, locale = 'ru') %>% layout(plot_bgcolor  = "rgba(0, 0, 0, 0)", paper_bgcolor = "rgba(0, 0, 0, 0)") %>%
+      layout(legend = list(
+        orientation = "h",
+        x = 0.3,
+        y = -0.1
+      ))
+    
+    fig <- subplot(tradeHistoryPlotEx, tradeHistoryPlotIm, nrows=2, margin = 0.1)
+    fig
+  })
+  
+  print('Global plot ready')
+
+
+  
+  # начало работы с Market Intelligence --------------------------------------------------------
+  
+  observeEvent(input$btn_build_country_report,
+               {
+                 # 1. Value Boxes
+                 
+                 output$exactcurrentMonthEx <- renderValueBox({
+                   exactcurrentMonthEx <- joinTables(df) %>%
+                     filter(STRANA %in% local(input$select_country)) %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth))) %>%
+                     filter(NAPR == 'ЭК') %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   valueBox(
+                     paste0(
+                       '$',
+                       format(exactcurrentMonthEx / 10 ^ 6, big.mark = ','),
+                       " млн"
+                     ),
+                     paste0('Экспорт ', input$chosenMonth),
+                     icon = icon('export', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 output$exactcurrentMonthIm <- renderValueBox({
+                   exactcurrentMonthIm <- joinTables(df) %>%
+                     filter(STRANA %in% local(input$select_country)) %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth))) %>%
+                     filter(NAPR == 'ИМ') %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   valueBox(
+                     paste0(
+                       '$',
+                       format(exactcurrentMonthIm / 10 ^ 6, big.mark = ','),
+                       " млн"
+                     ),
+                     paste0('Импорт ', input$chosenMonth),
+                     icon = icon('import', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 
+                 output$exactmonthgrowthEx <- renderValueBox({
+                   exactmonthgrowthEx <- joinTables(df) %>%
+                     filter(STRANA %in% local(input$select_country)) %>%
+                     filter(NAPR == 'ЭК') %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+                              PERIOD == local(as.numeric(input$chosenMonth - months(1)))) %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+                     ungroup() %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     filter(PERIOD == input$chosenMonth) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   valueBox(
+                     paste0(format(
+                       round(exactmonthgrowthEx * 100, 2), big.mark = ','
+                     ), " %"),
+                     paste0(
+                       'Темп роста экспорта ',
+                       input$chosenMonth,
+                       ' по отношению к ',
+                       input$chosenMonth - months(1)
+                     ),
+                     icon = icon('export', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 output$exactmonthgrowthIm <- renderValueBox({
+                   exactmonthgrowthIm <- joinTables(df) %>%
+                     filter(STRANA %in% local(input$select_country)) %>%
+                     filter(NAPR == 'ИМ') %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+                              PERIOD == local(as.numeric(input$chosenMonth - months(1)))) %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+                     ungroup() %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     filter(PERIOD == input$chosenMonth) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   
+                   valueBox(
+                     paste0(format(
+                       round(exactmonthgrowthIm * 100, 2), big.mark = ','
+                     ), " %"),
+                     paste0(
+                       'Темп роста импорта ',
+                       input$chosenMonth,
+                       ' по отношению к ',
+                       input$chosenMonth - months(1)
+                     ),
+                     icon = icon('import', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 
+                 output$exactyeargrowthEx <- renderValueBox({
+                   exactyeargrowthEx <- joinTables(df) %>%
+                     filter(STRANA %in% local(input$select_country)) %>%
+                     filter(NAPR == 'ЭК') %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+                              PERIOD == local(as.numeric(input$chosenMonth - months(12)))) %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+                     ungroup() %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     filter(PERIOD == input$chosenMonth) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   valueBox(
+                     paste0(format(
+                       round(exactyeargrowthEx * 100, 2), big.mark = ','
+                     ), " %"),
+                     paste0(
+                       'Темп роста экспорта ',
+                       input$chosenMonth,
+                       ' по отношению к ',
+                       input$chosenMonth - years(1)
+                     ),
+                     icon = icon('export', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 output$exactyeargrowthIm <- renderValueBox({
+                   exactyeargrowthIm <- joinTables(df) %>%
+                     filter(STRANA %in% local(input$select_country)) %>%
+                     filter(NAPR == 'ИМ') %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+                              PERIOD == local(as.numeric(input$chosenMonth - months(12)))) %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+                     ungroup() %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     filter(PERIOD == input$chosenMonth) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   valueBox(
+                     paste0(format(
+                       round(exactyeargrowthIm * 100, 2), big.mark = ','
+                     ), " %"),
+                     paste0(
+                       'Темп роста импорта ',
+                       input$chosenMonth,
+                       ' по отношению к ',
+                       input$chosenMonth - years(1)
+                     ),
+                     icon = icon('import', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 print('ValueBoxes ready')
+                 # 2. Trade plot
+                 # экспорт
+                 
+                 
+                 
+                 output$exacttradeHistoryPlots <- renderPlotly({
+                   
+                   exacttradeHistory <- joinTables(df) %>%
+                     filter(STRANA %in% local(input$select_country)) %>%
+                     group_by(PERIOD, STRANA, NAPR) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD))
+                   
+                   exacttradeHistoryPlotEx <-
+                     exacttradeHistory %>% 
+                     filter(NAPR == 'ЭК') %>%
+                     ggplot() +
+                     geom_line(aes(
+                       x = PERIOD,
+                       y = STOIM / 10 ^ 6,
+                       group = STRANA,
+                       col = STRANA,
+                       text = paste0(
+                         'Экспорт, ',
+                         STRANA,
+                         ', ',
+                         PERIOD,
+                         ': ',
+                         round(STOIM / 10 ^ 6, 1),
+                         ' млн'
+                       )
+                     )) +
+                     scale_color_discrete(name = '') +
+                     geom_line(
+                       data = exacttradeHistory %>%
+                         filter(NAPR == 'ЭК') %>%
+                         group_by(PERIOD) %>%
+                         summarise(TOTAL = sum(STOIM, na.rm = TRUE)),
+                       aes(
+                         x = PERIOD,
+                         y = TOTAL / 10 ^ 6,
+                         group = 1,
+                         col = 'blue',
+                         linetype = 'total',
+                         text = paste0(
+                           'Экспорт, по выбранным странам, ',
+                           PERIOD,
+                           ': ',
+                           round(TOTAL / 10 ^ 6, 1),
+                           ' млн'
+                         )
+                       )
+                     ) +
+                     scale_linetype_manual(name = '', values = c('total' = "dashed")) +
+                     xlab('') +
+                     ylab('млн $') +
+                     theme(legend.position = 'none')
+
+                   exacttradeHistoryPlotIm <-
+                     exacttradeHistory %>% 
+                     filter(NAPR == 'ИМ') %>%
+                     ggplot() +
+                     geom_line(aes(
+                       x = PERIOD,
+                       y = STOIM / 10 ^ 6,
+                       group = STRANA,
+                       col = STRANA,
+                       text = paste0(
+                         'Импорт, ',
+                         STRANA,
+                         ', ',
+                         PERIOD,
+                         ': ',
+                         round(STOIM / 10 ^ 6, 1),
+                         ' млн'
+                       )
+                     )) +
+                     scale_color_discrete(name = '') +
+                     geom_line(
+                       data = exacttradeHistory %>%
+                         filter(NAPR == 'ИМ') %>%
+                         group_by(PERIOD) %>%
+                         summarise(TOTAL = sum(STOIM, na.rm = TRUE)),
+                       aes(
+                         x = PERIOD,
+                         y = TOTAL / 10 ^ 6,
+                         group = 1,
+                         col = 'blue',
+                         linetype = 'total',
+                         text = paste0(
+                           'Импорт, по выбранным странам, ',
+                           PERIOD,
+                           ': ',
+                           round(TOTAL / 10 ^ 6, 1),
+                           ' млн'
+                         )
+                       )
+                     ) +
+                     scale_linetype_manual(name = '', values = c('total' = "dashed")) +
+                     xlab('') +
+                     ylab('млн $') +
+                     theme(legend.position = 'none')                   
+                   
+                   
+                   exacttradeHistoryPlotEx <-
+                     ggplotly(exacttradeHistoryPlotEx, tooltip = 'text') %>%
+                     config(displayModeBar = F, locale = 'ru') %>% layout(plot_bgcolor  = "rgba(0, 0, 0, 0)", paper_bgcolor = "rgba(0, 0, 0, 0)") %>%
+                     layout(legend = list(
+                       orientation = "h",
+                       x = 0.3,
+                       y = -0.1
+                     ))
+                   exacttradeHistoryPlotIm <-
+                     ggplotly(exacttradeHistoryPlotIm, tooltip = 'text') %>%
+                     config(displayModeBar = F, locale = 'ru') %>% layout(plot_bgcolor  = "rgba(0, 0, 0, 0)", paper_bgcolor = "rgba(0, 0, 0, 0)") %>%
+                     layout(legend = list(
+                       orientation = "h",
+                       x = 0.3,
+                       y = -0.1
+                     ))
+                   
+                   fig <- subplot(exacttradeHistoryPlotEx, exacttradeHistoryPlotIm, nrows=2, margin = 0.1)
+                   fig
+                 })
+                 
+                 print('Country plots ready')
+               })
+  
+  # начало работы с Commodity Intelligence --------------------------------------------------------
+  observe({
+    x <- substr(input$tnvedCheckbox, 1, 1)
+    if (x==2) {
+      updateSelectizeInput(session = getDefaultReactiveDomain()
+                           , inputId = "select_commodity"
+                           , choices = goods_list_2
+                           , selected= NULL
+      )
+    }
+    if (x==4) {
+      updateSelectizeInput(session = getDefaultReactiveDomain()
+                           , inputId = "select_commodity"
+                           , choices = goods_list_4
+                           , selected= NULL
+      )
+    }
+    if (x==6) {
+      updateSelectizeInput(session = getDefaultReactiveDomain()
+                           , inputId = "select_commodity"
+                           , choices = goods_list_6
+                           , selected= NULL
+      )
+    }
+
+  })
+  
+  observeEvent(input$btn_build_comm_report,
+               {
+                 
+                 # 1. Value Boxes
+                 y <- as.numeric(substr(input$tnvedCheckbox, 1, 1))
+                 
+                 print(y)
+                 output$tnvedcurrentMonthEx <- renderValueBox({
+                   tnvedcurrentMonthEx <- joinTables(df) %>%
+                     filter(rlang::sym(paste0("TNVED", y)) %in% local(input$select_commodity)) %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth))) %>%
+                     filter(NAPR == 'ЭК') %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   valueBox(
+                     paste0(
+                       '$',
+                       format(tnvedcurrentMonthEx / 10 ^ 6, big.mark = ','),
+                       " млн"
+                     ),
+                     paste0('Экспорт ', input$chosenMonth),
+                     icon = icon('export', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 output$tnvedcurrentMonthIm <- renderValueBox({
+                   tnvedcurrentMonthIm <- joinTables(df) %>%
+                     filter(rlang::sym(paste0("TNVED", y)) %in% local(input$select_commodity)) %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth))) %>%
+                     filter(NAPR == 'ИМ') %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   valueBox(
+                     paste0(
+                       '$',
+                       format(tnvedcurrentMonthIm / 10 ^ 6, big.mark = ','),
+                       " млн"
+                     ),
+                     paste0('Импорт ', input$chosenMonth),
+                     icon = icon('import', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 
+                 output$tnvedmonthgrowthEx <- renderValueBox({
+                   tnvedmonthgrowthEx <- joinTables(df) %>%
+                     filter(rlang::sym(paste0("TNVED", y)) %in% local(input$select_commodity)) %>%
+                     filter(NAPR == 'ЭК') %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+                              PERIOD == local(as.numeric(input$chosenMonth - months(1)))) %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+                     ungroup() %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     filter(PERIOD == input$chosenMonth) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   valueBox(
+                     paste0(format(
+                       round(tnvedmonthgrowthEx * 100, 2), big.mark = ','
+                     ), " %"),
+                     paste0(
+                       'Темп роста экспорта ',
+                       input$chosenMonth,
+                       ' по отношению к ',
+                       input$chosenMonth - months(1)
+                     ),
+                     icon = icon('export', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 output$tnvedmonthgrowthIm <- renderValueBox({
+                   tnvedmonthgrowthIm <- joinTables(df) %>%
+                     filter(rlang::sym(paste0("TNVED", y)) %in% local(input$select_commodity)) %>%
+                     filter(NAPR == 'ИМ') %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+                              PERIOD == local(as.numeric(input$chosenMonth - months(1)))) %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+                     ungroup() %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     filter(PERIOD == input$chosenMonth) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   
+                   valueBox(
+                     paste0(format(
+                       round(tnvedmonthgrowthIm * 100, 2), big.mark = ','
+                     ), " %"),
+                     paste0(
+                       'Темп роста импорта ',
+                       input$chosenMonth,
+                       ' по отношению к ',
+                       input$chosenMonth - months(1)
+                     ),
+                     icon = icon('import', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 
+                 output$tnvedyeargrowthEx <- renderValueBox({
+                   tnvedyeargrowthEx <- joinTables(df) %>%
+                     filter(rlang::sym(paste0("TNVED", y)) %in% local(input$select_commodity)) %>%
+                     filter(NAPR == 'ЭК') %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+                              PERIOD == local(as.numeric(input$chosenMonth - months(12)))) %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+                     ungroup() %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     filter(PERIOD == input$chosenMonth) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   valueBox(
+                     paste0(format(
+                       round(tnvedyeargrowthEx * 100, 2), big.mark = ','
+                     ), " %"),
+                     paste0(
+                       'Темп роста экспорта ',
+                       input$chosenMonth,
+                       ' по отношению к ',
+                       input$chosenMonth - years(1)
+                     ),
+                     icon = icon('export', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 output$tnvedyeargrowthIm <- renderValueBox({
+                   tnvedyeargrowthIm <- joinTables(df) %>%
+                     filter(rlang::sym(paste0("TNVED", y)) %in% local(input$select_commodity)) %>%
+                     filter(NAPR == 'ИМ') %>%
+                     filter(PERIOD == local(as.numeric(input$chosenMonth)) |
+                              PERIOD == local(as.numeric(input$chosenMonth - months(12)))) %>%
+                     group_by(PERIOD) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     mutate(STOIM = STOIM / lag(STOIM, 1) - 1) %>%
+                     ungroup() %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD)) %>%
+                     filter(PERIOD == input$chosenMonth) %>%
+                     select(STOIM) %>%
+                     as.numeric
+                   
+                   valueBox(
+                     paste0(format(
+                       round(tnvedyeargrowthIm * 100, 2), big.mark = ','
+                     ), " %"),
+                     paste0(
+                       'Темп роста импорта ',
+                       input$chosenMonth,
+                       ' по отношению к ',
+                       input$chosenMonth - years(1)
+                     ),
+                     icon = icon('import', lib = 'glyphicon'),
+                     color = "green"
+                   )
+                 })
+                 
+                 print('ValueBoxes ready')
+                 
+                 
+                 # 2. Trade plot
+                 # экспорт
+                 
+                 output$tnvedtradeHistoryPlots <- renderPlotly({
+                   
+                   tnvedtradeHistory <- joinTables(df) %>%
+                     filter(rlang::sym(paste0("TNVED", y)) %in% c('03')) %>%
+                     group_by(PERIOD, NAPR) %>%
+                     summarise(STOIM = sum(STOIM, na.rm = TRUE)) %>%
+                     collect() %>%
+                     mutate(PERIOD = as.Date(PERIOD))
+                   
+                   tnvedtradeHistoryPlotEx <-
+                     tnvedtradeHistory %>% 
+                     filter(NAPR == 'ЭК') %>%
+                     ggplot() +
+                     geom_line(aes(
+                       x = PERIOD,
+                       y = STOIM / 10 ^ 6,
+                       text = paste0(
+                         'Экспорт, ',
+                         'Суммарный',
+                         ', ',
+                         PERIOD,
+                         ': ',
+                         round(STOIM / 10 ^ 6, 1),
+                         ' млн'
+                       )
+                     )) +
+                     scale_color_discrete(name = '') +
+                     geom_line(
+                       data = tnvedtradeHistory %>%
+                         filter(NAPR == 'ЭК') %>%
+                         group_by(PERIOD) %>%
+                         summarise(TOTAL = sum(STOIM, na.rm = TRUE)),
+                       aes(
+                         x = PERIOD,
+                         y = TOTAL / 10 ^ 6,
+                         group = 1,
+                         col = 'blue',
+                         linetype = 'total',
+                         text = paste0(
+                           'Суммарный экспорт, ',
+                           PERIOD,
+                           ': ',
+                           round(TOTAL / 10 ^ 6, 1),
+                           ' млн'
+                         )
+                       )
+                     ) +
+                     scale_linetype_manual(name = '', values = c('total' = "fill")) +
+                     xlab('') +
+                     ylab('млн $') +
+                     theme(legend.position = 'none')
+                   
+                   tnvedtradeHistoryPlotIm <-
+                     tnvedtradeHistory %>% 
+                     filter(NAPR == 'ИМ') %>%
+                     ggplot() +
+                     geom_line(aes(
+                       x = PERIOD,
+                       y = STOIM / 10 ^ 6,
+                       text = paste0(
+                         'Импорт, ',
+                         'Суммарный',
+                         ', ',
+                         PERIOD,
+                         ': ',
+                         round(STOIM / 10 ^ 6, 1),
+                         ' млн'
+                       )
+                     )) +
+                     scale_color_discrete(name = '') +
+                     geom_line(
+                       data = tnvedtradeHistory %>%
+                         filter(NAPR == 'ИМ') %>%
+                         group_by(PERIOD) %>%
+                         summarise(TOTAL = sum(STOIM, na.rm = TRUE)),
+                       aes(
+                         x = PERIOD,
+                         y = TOTAL / 10 ^ 6,
+                         group = 1,
+                         col = 'blue',
+                         linetype = 'total',
+                         text = paste0(
+                           'Суммарный импорт, ',
+                           PERIOD,
+                           ': ',
+                           round(TOTAL / 10 ^ 6, 1),
+                           ' млн'
+                         )
+                       )
+                     ) +
+                     scale_linetype_manual(name = '', values = c('total' = "fill")) +
+                     xlab('') +
+                     ylab('млн $') +
+                     theme(legend.position = 'none')                   
+                   
+                   
+                   tnvedtradeHistoryPlotEx <-
+                     ggplotly(tnvedtradeHistoryPlotEx, tooltip = 'text') %>%
+                     config(displayModeBar = F, locale = 'ru') %>% layout(plot_bgcolor  = "rgba(0, 0, 0, 0)", paper_bgcolor = "rgba(0, 0, 0, 0)") %>%
+                     layout(legend = list(
+                       orientation = "h",
+                       x = 0.3,
+                       y = -0.1
+                     ))
+                   tnvedtradeHistoryPlotIm <-
+                     ggplotly(tnvedtradeHistoryPlotIm, tooltip = 'text') %>%
+                     config(displayModeBar = F, locale = 'ru') %>% layout(plot_bgcolor  = "rgba(0, 0, 0, 0)", paper_bgcolor = "rgba(0, 0, 0, 0)") %>%
+                     layout(legend = list(
+                       orientation = "h",
+                       x = 0.3,
+                       y = -0.1
+                     ))
+                   
+                   fig <- subplot(tnvedtradeHistoryPlotEx, tnvedtradeHistoryPlotIm, nrows=2, margin = 0.1)
+                   fig
+                 })
+                 
+                 print('Global plot ready')
+  })
+  
+}
+
+shinyApp(ui, server)
