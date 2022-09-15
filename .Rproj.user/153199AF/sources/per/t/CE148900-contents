@@ -1,0 +1,959 @@
+library(RSQLite)
+library(stringr)
+library(stringi)
+library(clock)
+library(dplyr)
+library(lubridate)
+library(fpp3)
+library(readxl)
+library(foreign)
+library(xts)
+library(tidyquant)
+library(timetk)
+library(grid)
+library(ggpubr)
+library(imputeTS)
+library(plotly)
+library(writexl)
+library(seasonal)
+library(RColorBrewer)
+library(tsoutliers)
+library(rusmaps)
+library(statebins)
+library(geofacet)
+library(stringr)
+library(MASS)
+library(ggalluvial)
+library(hrbrthemes)
+library(viridis)
+library(extrafont)
+library(sf)
+library(showtext)
+select <- dplyr::select
+theme_set(theme_minimal())
+options(scipen=999)
+options(encoding = "UTF-8")
+# connect to fedstat SQL
+path <- "D:/YandexDisk/fedstat-parser/data.sqlite"
+conn <- dbConnect(RSQLite::SQLite(), path)
+
+source('functions.R')
+
+# cpi in mean 2016 prices
+cpi <- Quandl("RATEINF/CPI_RUS", api_key="8Wztb5pSRV5aLNZsWT9z") %>%
+  rename("date" = "Date", "cpi" = "Value") %>%
+  arrange(date) %>%
+  mutate(date = floor_date(date, unit='months'))
+cpi <- cpi %>% 
+  mutate(cpi = cpi/mean(cpi[253:264])) 
+# capital deflator in mean 2016 prices
+capdef <- read_excel('data_inputs/capital.xlsx', col_names = FALSE)
+names(capdef) <- c('date',  'capdef')
+capdef <- capdef %>% 
+  mutate(capdef = as.numeric(capdef)/100, date = as.Date(date))
+# production data (units)
+prod_2017 <- load_data(57783) # 2017-2022
+names(prod_2017) <- c('OKEI', 'OKEI_id', 'OKATO', 'OKATO_id', 'OKPD', 'OKPD_id', 'EI', 'period', 'year', 'value')
+prod_2017 <- conv_date(prod_2017, 8, 9, type='monthly')
+prod_2010 <- load_data(40636) # 2010-2016
+names(prod_2010) <- c('OKEI', 'OKEI_id', 'OKATO', 'OKATO_id', 'OKPD', 'OKPD_id', 'EI', 'period', 'year', 'value')
+prod_2010 <- conv_date(prod_2010, 8, 9, type='monthly')
+# production data (rubles)
+prodRUB_2017 <- load_data(57722)
+names(prodRUB_2017) <- c("type1", "OKVED", "OKATO", "OKATO_id", "type", "EI", "period", "year", "value")
+prodRUB_2017 <- prodRUB_2017 %>%
+  filter(type1=='За отчетный месяц') %>%
+  select(-type1)
+prodRUB_2017 <- conv_date(prodRUB_2017, 6, 7, type='monthly')
+prodRUB_2010 <- load_data(37616)
+names(prodRUB_2010) <- c('OKVED', 'OKATO', 'OKATO_id', "type", "EI", 'period', 'year', 'value')
+prodRUB_2010 <- conv_date(prodRUB_2010, 6, 7, type='monthly')
+prodRUB_all <- rbind(prodRUB_2010, prodRUB_2017)
+# prodRUB$value[c(163)] <- NA
+
+# tax data
+tax_all <- readRDS('data_inputs/other/FNS_data_noncum.RDS')
+names(tax_all) <- c('OKVED', 'OKVED_id', 'type', 'value', 'date')
+# producer prices data
+price_2017 <- load_data(57606) # 2017-2022
+names(price_2017) <- c('OKEI', 'OKEI_id', 'OKATO', 'OKATO_id', 'OKPD', 'OKPD_id', 'type', 'EI', 'period', 'year', 'value')
+price_2017 <- conv_date(price_2017, 9, 10, type='monthly')
+price_2010 <- load_data(40612) # 2010-2016
+names(price_2010) <- c('OKATO', 'OKATO_id', 'OKPD', 'OKPD_id', 'type', 'EI', 'period', 'year', 'value')
+price_2010 <- conv_date(price_2010, 7, 8, type='monthly')
+# wage
+wage_2017 <- load_data(57824)
+names(wage_2017) <- c('OKVED', 'OKATO', 'OKATO_id', 'EI', 'period', 'year', 'value')
+wage_2017 <- conv_date(wage_2017, 5, 6, type='monthly')
+wage_2010 <- load_data(43246)
+names(wage_2010) <- c('OKVED', 'OKATO', 'OKATO_id', 'EI', 'period', 'year', 'value')
+wage_2010 <- conv_date(wage_2010, 5, 6, type='monthly')
+wage_all <- rbind(wage_2010, wage_2017)
+# employment
+empl_2017 <- load_data(57822)
+names(empl_2017) <- c('OKVED', 'OKATO', 'OKATO_id', 'EI', 'period', 'year', 'value')
+empl_2017 <- conv_date(empl_2017, 5, 6, type='monthly')
+empl_2010 <- load_data(45619)
+names(empl_2010) <- c('OKVED', 'OKATO', 'OKATO_id', 'EI', 'period', 'year', 'value')
+empl_2010 <- conv_date(empl_2010, 5, 6, type='monthly')
+empl_all <- rbind(empl_2010, empl_2017)
+# capacity utilization
+cap_all <- readRDS('data_inputs/other/processed_capacity_util.rds')
+# capital investment
+capital_2017 <- load_data(59084)
+names(capital_2017) <- c('OKVED', 'OKATO', 'OKATO_id', 'firmtype', 'EI', 'period', 'year', 'value')
+capital_2017 <- conv_date(capital_2017, 6, 7, type='q_cum')
+capital_2010 <- load_data(40534)
+names(capital_2010) <- c('OKVED', 'type', 'OKATO', 'firmtype', 'OKFS', 'EI', 'period', 'year', 'value')
+capital_2010 <- conv_date(capital_2010, 7, 8, type='q_cum') %>%
+  filter(type=='Всего') %>%
+  filter(OKFS=='Всего (по всем формам собственности)') %>%
+  select(-type, OKFS) %>%
+  mutate(OKATO_id=NA, value=value*1000) %>%
+  select('OKVED', 'OKATO', 'OKATO_id', 'firmtype', 'EI', 'period', 'year', 'value', 'date')
+capital_all <- rbind(capital_2010, capital_2017)
+# labour costs
+fot_17 <- load_data(57849)
+names(fot_17) <- c('OKVED', 'OKATO', 'OKATO_id', 'EI', 'period', 'year', 'value')
+fot_17 <- conv_date(fot_17, 5, 6, type='monthly')
+fot_all <- fot_17
+# depreciation
+depr_all <- load_data(59232)
+names(depr_all) <- c('OKVED', 'OKATO', 'OKATO_id', 'type', 'EI', 'period', 'year', 'value')
+depr_all <- conv_date(depr_all, 6, 7, type='yearly')
+depr_all$value <- 1/depr_all$value
+
+# production data by region from Sophist
+# monthly_prod <- readRDS('data_inputs/other/processed_prod_month.rds')
+# id_split <- first(which(lapply(monthly_prod, length)==7))
+# prod_reg_2010 <- monthly_prod[1:(id_split-1)]
+# prod_reg_2017 <- monthly_prod[id_split:length(monthly_prod)]
+# prod_reg_2010 <- prod_reg_2010 %>%
+#   bind_rows(.id = "groups") %>% rename("date" = "groups", "OKPD_id" = "code", "OKATO" = "region", "OKPD" = "prod") %>% mutate(date = as.Date(date))
+# prod_reg_2017 <- prod_reg_2017 %>%
+#   bind_rows(.id = "groups") %>% rename("date" = "groups", "OKATO" = "region", "OKPD_id" = "OKPD2_id", "OKPD" = "OKPD_name", "OKEI" = "OKEI_name") %>% mutate(date = as.Date(date))
+# # okato_key <- data.frame(OKATO = unique(monthly_prod_2010$OKATO))
+# okato_key2 <- data.frame(OKATO = unique(prod_reg_2017$OKATO))
+# okato_key2 <- okato_key2 %>%
+#   left_join(prod_reg_2017[,c('OKATO','OKATO_id')]) %>% filter(!duplicated(OKATO))
+# # write.table(okato_key2, 'data_inputs/other/okato_key2.csv', sep=';', fileEncoding = "windows-1251", row.names = FALSE, quote=FALSE)
+# # write.table(okato_key, 'data_inputs/other/okato_key.csv', sep=';', fileEncoding = "windows-1251", row.names = FALSE)
+# okato_key <- read.table('data_inputs/other/okato_key.csv', sep=';',  fileEncoding = "windows-1251", header = TRUE)
+# prod_reg_2010 <- prod_reg_2010 %>%
+#   left_join(okato_key) %>% left_join(okato_key2, by=c("OKATO_new" = "OKATO"))
+# prod_reg_2010[is.na(prod_reg_2010$OKATO_id),]$OKATO_id <- '039'
+# saveRDS(prod_reg_2010, 'data_inputs/other/prod_reg_2010.RDS')
+# saveRDS(prod_reg_2017, 'data_inputs/other/prod_reg_2017.RDS')
+
+prod_reg_2010 <- readRDS('data_inputs/other/prod_reg_2010.RDS')
+prod_reg_2017 <- readRDS('data_inputs/other/prod_reg_2017.RDS')
+
+# stocks data
+stocks_2017 <- load_data(57789)
+names(stocks_2017) <- c('OKEI', 'OKEI_id', 'OKATO', 'OKATO_id', 'OKPD', 'OKPD_id', 'EI', 'period', 'year', 'value')
+stocks_2017 <- conv_date(stocks_2017, 8, 9, type='monthly')
+stocks_2010 <- load_data(43236)
+names(stocks_2010) <- c('OKEI', 'OKEI_id', 'OKPD', 'OKPD_id', 'OKATO', 'OKATO_id', 'EI', 'period', 'year', 'value')
+stocks_2010 <- conv_date(stocks_2010, 8, 9, type='monthly')
+
+# International trade data
+fts <- readRDS("D:/YandexDisk/Russia/!FTS/df-10-znak.RDS")
+mirror <- readRDS("D:/YandexDisk/Russia/!FTS/df-mirror-MikeZinov.RDS")
+
+
+# Retail trade data
+retail_2017 <- load_data(57699)
+names(retail_2017) <- c('OKATO', 'OKATO_id', 'OKPD', 'OKPD_id', 'EI', 'period', 'year', 'value')
+retail_2017 <- conv_date(retail_2017, 6, 7, type='q_cum')
+retail_2010 <- load_data(31433)
+names(retail_2010) <- c('OKATO', 'OKATO_id', 'OKPD', 'OKPD_id', 'EI', 'period', 'year', 'value')
+retail_2010 <- conv_date(retail_2010, 6, 7, type='q_cum')
+
+# Trade margin data
+margin <- read_xlsx('data_inputs/margin.xlsx')
+margin <- data.frame(t(margin)[-c(1),])
+margin <- margin[,-c(1,2)]
+names(margin) <- margin[1,]
+margin <- margin[-1,]
+margin$date <- seq(as.Date('2010-01-01'), as.Date('2023-01-01'), by='quarter')
+margin <- margin %>% pivot_longer(-date)
+
+# product category keys
+keys <- data.frame(read_xlsx('data_inputs/key_market.xlsx'))
+categories <- unique(keys$name)
+edizm <- get_edizm()[,1:2]
+names(edizm)[1] <- 'EDIZM'
+# manually calculated retail sales
+sales_manualcalc <- data.frame(read_xlsx('data_inputs/other/Нелегальный оборот-2022.xlsx', sheet='RDATA_sales'))
+# manually calculated counterfeit
+cnt_manual <- data.frame(read_xlsx('data_inputs/other/Нелегальный оборот-2022.xlsx'))
+
+# consumer prices data
+kipc_names <- keys$KIPC[!is.na(keys$KIPC)]
+filter <- paste(
+  paste0("s_grtov.fed_title = '", kipc_names, "'"),
+  collapse=' or ')
+filter <- paste('WHERE ', filter)
+c_price <- load_data(31448, filter = filter)
+names(c_price) <- c('KIPC', 'OKATO', 'OKATO_id', 'EI', 'period', 'year', 'value')
+c_price <- conv_date(c_price, 5, 6, type='monthly')
+# c_price %>%
+#   group_by(date) %>%
+#   summarise(mean = mean(value), median=median(value)) %>%
+#   ggplot() + 
+#   geom_line(aes(x=date, y=mean, col='red')) +
+#   geom_line(aes(x=date, y=median, col='blue')) +
+#   theme(legend.position = 'none')
+# 
+# c_price %>%
+#   filter(KIPC == kipc_names[1]) %>%
+#   ggplot() + 
+#   geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+#   theme(legend.position = 'none')
+
+# Interregional trade
+# folder <- 'data_inputs/interreg'
+# cig_interreg <- list()
+# ed='тыс. руб.'
+# fed_districts <- TRUE
+# for (i in 9:20) {
+#   file <- paste0(folder, '/cig', '_', i, '.csv')
+#   dat <- read.csv(file, header = TRUE, sep = ';', dec = ',', fileEncoding = 'windows-1251')[1:21] %>%
+#     distinct() %>%
+#     filter(!row_number() %in% c(1,2,3,6))
+#   dat <- Filter(function(x)!all(is.na(x)), dat)
+#   for (j in 3:ncol(dat)) {
+#     if (dat[2,j]=="") dat[2,j]=dat[1,j]
+#   }
+#   dat <- dat[-1,]
+#   colnames(dat) <- t(dat[1,])[,1]
+#   colnames(dat)[2] <- c('Российская Федерация')
+#   dat <- dat[-1,]
+#   
+#   if (fed_districts) {
+#     dat <- dat %>%
+#       select(contains("ввезе"), contains("федера"), -contains("росси")) %>%
+#       pivot_longer(-'Ввезено', names_to = "out", values_to = "value") %>%
+#       rename("into" = 'Ввезено') %>%
+#       mutate(into = str_squish(into), out = str_squish(out)) %>%
+#       mutate(value = str_replace_all(value, fixed(" "), "")) %>%
+#       mutate(value = str_replace_all(value, ",", "."))
+#     dat_suppl <- dat %>%
+#       filter(str_detect(into, regex('росси', ignore_case = TRUE)))
+#     dat_suppl$value <- as.numeric(dat_suppl$value)
+#     dat <- dat %>%
+#       filter(!into %in% c('Всего', 'Экспорт -всего')) %>%
+#       filter(str_detect(into, regex('федер', ignore_case = TRUE))) %>%
+#       filter(!str_detect(into, regex('росси', ignore_case = TRUE))) %>%
+#       filter(into != out)
+#   } else {
+#     dat <- dat %>%
+#       select(!contains("федера")) %>%
+#       pivot_longer(-'Ввезено', names_to = "out", values_to = "value") %>%
+#       rename("into" = 'Ввезено') %>%
+#       filter(!into %in% c('Всего', 'Экспорт -всего')) %>%
+#       filter(!str_detect(into, regex('федер', ignore_case = TRUE))) %>%
+#       filter(into != out) %>%
+#       mutate(value = str_replace_all(value, fixed(" "), "")) %>%
+#       mutate(value = str_replace_all(value, ",", ".")) %>%
+#       mutate(into = str_squish(into), out = str_squish(out))
+#   }
+#   
+#   dat$value <- as.numeric(dat$value)
+#   theme_set(theme_minimal())
+#   # quantiles <- quantile(dat$value, c(0.8, 0.9), na.rm=TRUE)
+#   if (fed_districts) {
+#     dat <- dat %>% 
+#       left_join(dat_suppl %>% rename("value_suppl" = "value") %>% select(out, value_suppl), by="out")
+#     dat <- dat %>%
+#       filter(!is.na(value)) %>%
+#       mutate(out = str_replace_all(out, regex('федеральный округ', ignore_case = TRUE), 'Ф.О.'),
+#              into = str_replace_all(into, regex('федеральный округ', ignore_case = TRUE), 'Ф.О.'))
+#     
+#     nexp <- length(unique(dat$out))
+#     nimp <- length(unique(dat$into))
+#   } else {
+#     nexp <- 4
+#     nimp <- 4
+#     # identify largest exporters
+#     larg_exp <- dat %>%
+#       filter(!is.na(value)) %>%
+#       group_by(out) %>%
+#       summarize(value = sum(value)) %>%
+#       arrange(desc(value)) %>%
+#       mutate(Index = 1:n(), out2 = ifelse(Index > nexp, "Прочие", out))
+#     # identify largest importers
+#     larg_imp <- dat %>%
+#       filter(!is.na(value)) %>%
+#       group_by(into) %>%
+#       summarize(value = sum(value)) %>%
+#       arrange(desc(value)) %>%
+#       mutate(Index = 1:n(), into2 = ifelse(Index > nimp, "Прочие", into))  
+#     dat <- dat %>%
+#       left_join(larg_exp %>% select(out, out2), by="out") %>%
+#       left_join(larg_imp %>% select(into, into2), by="into") %>%
+#       filter(!is.na(value)) %>%
+#       mutate(ord = ifelse(out2=='Прочие', 2, 1)) %>%
+#       select(out2, into2, value) %>%
+#       group_by(out2, into2) %>%
+#       summarize(value = sum(value)) %>%
+#       rename("out"= "out2", "into" = "into2")
+#   }
+# 
+# 
+#   p <- dat %>%
+#     ggplot(aes(y=value, axis1 = out, axis2 = into)) +
+#     geom_flow(aes(fill = out), stat = "alluvium", curve_type = "sine", alpha = 0.3,
+#               show.legend = FALSE, decreasing=FALSE, width=1/40) +
+#     geom_stratum(fill = 'grey95', width = 1/50, color = '#440154FF', decreasing=FALSE) +
+#     ggrepel::geom_text_repel(decreasing=FALSE,
+#                              aes(label = after_stat(stratum)), segment.color = 'transparent',
+#       stat = "stratum", size=2.7, nudge_x = c(rep(-0.2, nexp), rep(0.2, nimp)),  direction='x', box.padding=0) +
+#     scale_x_discrete() +
+#     scale_y_continuous(name=ed, labels = function(x) format(x, big.mark = " ")) + 
+#     # theme_void() + 
+#     theme(legend.position='bottom', text = element_text(size = 5, color = 'black'),
+#           axis.text.y = element_text(size=6),
+#           plot.background = element_rect(color = NA, fill = "grey95"),
+#           plot.title = element_text(color = "black",
+#                                     size = 20, 
+#                                     face = "bold",
+#                                     hjust = 0.5,
+#                                     margin = margin(t = 24, b = 6)),
+#           plot.subtitle = element_text(color = "black",
+#                                        size = 15, 
+#                                        face = "plain",
+#                                        hjust = 0.5,
+#                                        margin = margin(t = 0, b = 0)),
+#           plot.caption = element_text(color = "black", 
+#                                       size = 8, 
+#                                       hjust = 0.5,
+#                                       margin = margin(t = 0, b = 24))) +
+#     labs(x = NULL, y = NULL,
+#          title = "Вывоз и Ввоз Папирос и Сигарет",
+#          subtitle = "2009",
+#          caption = "Логарифмическая шкала. Данные Sophist.HSE")
+#   p
+#   cig_interreg[[i-8]] <- dat
+# }
+# names(cig_interreg) <- seq(from=2009, to=2020, by=1)
+
+
+
+## Mineral and Bottled Water
+# get units
+supply_data(categories[1], units=TRUE)
+# conversion factors to mln litres 
+convert <- c(1/2000, 1/1000000, 1/1000000, 1/2000)
+# get data
+water_mineral <- supply_data(categories[1], missing_interp=FALSE, convert=convert, exclude_partners = list(ex='KZ', im=NULL), prodPriceGroups = list(
+  c('15.98.11', '11.07.11')
+))
+# first look
+all_plots(plotter(water_mineral, ed='млн л.'), save=TRUE)
+# perform manual data adjustment
+# 1
+water_mineral$stocks$value[c(72,129)] <- NA
+temp <- zoo(water_mineral$stocks$value, order.by=water_mineral$stocks$date, frequency = 12)
+fit <- na_ma(temp)
+water_mineral$stocks$value <- as.numeric(fit)
+#2
+water_mineral$prod_price <- water_mineral$prod_price %>%
+  mutate(OKEI = ifelse(is.na(OKEI), 'Тысяча полулитров', OKEI)) %>%
+  mutate(value = ifelse(OKEI=='Тысяча полулитров', 2*value/1000, value)) %>% 
+  mutate(value = ifelse(OKEI=='Декалитр', value/10, value)) %>%
+  mutate(OKEI = 'литр')
+water_mineral$production$value <- na_seasplit(ts(water_mineral$production$value, start=c(2010,1), freq=12))
+# a better look
+all_plots(plotter(water_mineral, ed='млн л.'), save=TRUE)
+# prepare data for plotting
+water_mineral_plot <- prepare_data(water_mineral, ed='млн л.', ed_tradeprice = 'кг.', retail_manual=sales_manualcalc[,c(1:3)])
+water_mineral_plot <- counterfeitCalc(water_mineral_plot, cnt=cnt_manual[,c(1,3)], loess_span = 0.15)
+water_mineral_plot <- estMeanChange(water_mineral_plot)
+# , date_for_graph=as.Date('2022-03-01')
+
+# water_mineral_plot <- calcCapStock(water_mineral_plot)
+# water_mineral_plot <- calcTax(water_mineral_plot)
+# water_mineral_plot <- estCobbDouglas(water_mineral_plot, robust=TRUE, capacity_corr = FALSE)
+# water_mineral_plot <- calcCobbDouglas(water_mineral_plot, w=last(water_mineral_plot$wage$value_sa),
+#                                      r=0.05)
+# combined graph
+#stack_supply(water_mineral_plot, sa=TRUE, save=FALSE)
+#stack_supply(water_mineral_plot, sa=FALSE, save=FALSE)
+
+
+## Cigarettes
+# get units
+supply_data(categories[2], units=TRUE)
+# conversion factors to mln units
+convert <- c(1, 1/1000, 1/1000, 1)
+# get data
+cigarettes <- supply_data(categories[2], convert=convert, missing_interp=FALSE, save=FALSE, trade_type='KOL', 
+                          taxcat = c('Поступило - федеральные, НДС',
+                                     'Поступило - федеральные, НДФЛ',
+                                     'Поступило - федеральные, прибыль',
+                                     'Поступило - федеральные, акциз'), prodPriceGroups = list(
+                                       c('16.00.11.120', '12.00.11.130')
+                                     )
+                          )
+all_plots(plotter(cigarettes, ed='млн шт.'), save=TRUE)
+# 1
+cigarettes$stocks$value[c(41,112,76:83)] <- NA
+temp <- zoo(cigarettes$stocks$value, order.by=cigarettes$stocks$date, frequency = 12)
+plot(temp)
+fit <- na_ma(temp)
+cigarettes$stocks$value <- as.numeric(fit)
+# 2
+# cigarettes$stocks$value[c(seq(12, 143, 12), seq(11, 143, 12), seq(13, 143, 12))] <- NA
+# temp <- zoo(cigarettes$stocks$value, order.by=cigarettes$stocks$date, frequency = 12)
+# plot(temp)
+# fit <- na_ma(temp)
+# cigarettes$stocks$value <- as.numeric(fit)
+# 3 
+cigarettes$export$value[76] <- NA
+temp <- zoo(cigarettes$export$value, order.by=cigarettes$export$date, frequency = 12)
+fit <- na_ma(temp)
+cigarettes$export$value <- as.numeric(fit)
+# 4
+cigarettes$retail$value[25] <- 125304642.14
+cigarettes$retail$value[28] <- 610269718.21
+# !!!!!!!!!!!!
+cigarettes$retail$value[26] <- cigarettes$retail$value[25] + (610269718.21-125304642.14)/3
+cigarettes$retail$value[27] <- cigarettes$retail$value[26] + (610269718.21-125304642.14)/3
+# 5
+cigarettes$retail_FD <- cigarettes$retail_FD[-which(cigarettes$retail_FD$value==82582601.7),]
+cigarettes$retail_FD <- cigarettes$retail_FD %>% arrange(date)
+for (i in unique(cigarettes$retail_FD$OKATO_id)) {
+  sub <- cigarettes$retail_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  cigarettes$retail_FD[cigarettes$retail_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+cigarettes$retail_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+# 6
+cigarettes$production$value <- na_seasplit(ts(cigarettes$production$value, start=c(2010,1), freq=12))
+# better look
+all_plots(plotter(cigarettes, ed='млн шт.'), save=TRUE)
+# prepare data for plotting
+cigarettes_plot <- prepare_data(cigarettes, ed='млн шт.', ed_tradeprice = 'шт.')
+# cigarettes_plot$df_retail_FD <- cigarettes_plot$df_retail_FD %>%
+#   distinct(value, OKATO, .keep_all=T) %>%
+#   arrange(OKATO_id, date)
+
+cigarettes_plot <- counterfeitCalc(cigarettes_plot, cnt=cnt_manual[,c(1,2)], date_for_graph=as.Date('2019-07-01'), loess_span = 0.25)
+ts.plot(cigarettes_plot$counterfeit$counterfeit_smooth)
+cigarettes_plot <- calcTax(cigarettes_plot)
+
+# cigarettes_plot <- calcCapStock(cigarettes_plot)
+# cigarettes_plot <- estCobbDouglas(cigarettes_plot, robust=TRUE, capacity_corr = TRUE, crs=TRUE)
+# # wage should be entered as MONTHLY rate, interest rate should be ANNUALIZED
+# cigarettes_plot <- calcCobbDouglas(cigarettes_plot, w=last(cigarettes_plot$wage$value_sa),
+#                                    r=0.13)
+cigarettes_plot$taxStruct # insert new names to taxcatnames
+cigarettes_plot <- estMeanChange(cigarettes_plot, smooth_span_m = 0.1, smooth_span_q=0.2, date_mark_m='2019-10-01', date_mark_q='2019-04-01',
+                                 price_model=loadR('Сигареты с фильтром отечественные, пачка'), year_sales=2019, taxcatnames = c('Всего', 'Акциз', 'НДС', 'НДФЛ',
+                                                                                                                               'Налог на прибыль', 'Прочее'))
+cigarettes_plot$meanImpact
+fcast_plot(cigarettes_plot$meanImpact$rawfcast, varnames=c('empl', 'empl_arima'), date_mark = as.Date('2019-10-01'))
+# combined graph
+#stack_supply(cigarettes_plot, sa=TRUE, save=FALSE)
+#stack_supply(cigarettes_plot, sa=FALSE, save=FALSE)
+
+
+## Молоко и сливки
+# get units
+supply_data(categories[4], units=TRUE, trade_type = 'NETTO')
+# conversion factors to mln kilogramms 
+convert <- c(1/1000, 1/10^6, 1/10^6, 1/1000)
+# get data
+milk <- supply_data(categories[4], missing_interp=FALSE, convert=convert, taxcat = c('Поступило - федеральные, НДС',
+                                                                                     'Поступило - федеральные, НДФЛ',
+                                                                                     'Поступило - федеральные, прибыль',
+                                                                                     'Поступило - федеральные, акциз'), prodPriceGroups = list(
+                                                                                       c('15.51.11.007', '10.51.11'),
+                                                                                       c('10.51.12')
+                                                                                     ))
+# first look
+all_plots(plotter(milk, ed='млн кг.'), save=TRUE)
+# 1
+milk$production$value <- na_seasplit(ts(milk$production$value, start=c(2010,1), freq=12))
+# 2
+milk$import$value[44] <- NA
+milk$import$value <- na_seasplit(ts(milk$import$value, start=c(2014,1), freq=12))
+# 3
+milk$stocks$value[c(85,119)] <- NA
+milk$stocks$value <- na_seasplit(ts(milk$stocks$value, start=c(2010,1), freq=12))
+# 4
+milk$retail_FD <- milk$retail_FD %>% arrange(date)
+for (i in unique(milk$retail_FD$OKATO_id)) {
+  sub <- milk$retail_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  milk$retail_FD[milk$retail_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+milk$retail_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+# better look
+all_plots(plotter(milk, ed='млн кг.'), save=TRUE)
+# prepare data for plotting
+milk_plot <- prepare_data(milk, ed='млн кг.', ed_tradeprice = 'кг.')
+milk_plot <- counterfeitCalc(milk_plot)
+milk_plot <- estMeanChange(milk_plot)
+
+# combined graph
+#stack_supply(milk_plot, sa=TRUE, save=FALSE)
+#stack_supply(milk_plot, sa=FALSE, save=FALSE)
+
+
+## Сухое молоко
+# get units
+supply_data(categories[5], units=TRUE, trade_type = 'NETTO')
+# conversion factors to mln kilogramms 
+convert <- c(1/1000, 1/10^6, 1/10^6, 1/1000)
+# get data
+dry_milk <- supply_data(categories[5], missing_interp=FALSE, convert=convert, taxcat = c('Поступило - федеральные, НДС',
+                                                                                     'Поступило - федеральные, НДФЛ',
+                                                                                     'Поступило - федеральные, прибыль',
+                                                                                     'Поступило - федеральные, акциз'), prodPriceGroups = list(
+                                                                                       c('15.51.20.103', '10.51.22.110'),
+                                                                                       c('15.51.20.111', '10.51.21.110')
+                                                                                     ))
+# first look
+all_plots(plotter(dry_milk, ed='млн кг.'), save=TRUE)
+# 1
+dry_milk$production$value <- na_seasplit(ts(dry_milk$production$value, start=c(2010,1), freq=12))
+# 2
+dry_milk$stocks$value[c(96)] <- NA
+dry_milk$stocks$value[c(96)] <- mean(dry_milk$stocks$value[c(95,97)])
+ts.plot(dry_milk$stocks$value)
+#3
+dry_milk$production_FD <- dry_milk$production_FD %>% arrange(date)
+for (i in unique(dry_milk$production_FD$OKATO_id)) {
+  sub <- dry_milk$production_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  temp[which(zoo::index(temp)==as.Date('2022-03-01'))] <- NA
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  dry_milk$production_FD[dry_milk$production_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+# 4
+dry_milk$retail_FD <- dry_milk$retail_FD %>% arrange(date)
+for (i in unique(dry_milk$retail_FD$OKATO_id)) {
+  sub <- dry_milk$retail_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  dry_milk$retail_FD[dry_milk$retail_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+dry_milk$retail_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+# better look
+all_plots(plotter(dry_milk, ed='млн кг.'), save=TRUE)
+# prepare data for plotting
+dry_milk_plot <- prepare_data(dry_milk, ed='млн кг.')
+dry_milk_plot <- counterfeitCalc(dry_milk_plot)
+dry_milk_plot <- estMeanChange(dry_milk_plot)
+
+# combined graph
+#stack_supply(dry_milk_plot, sa=TRUE, save=FALSE)
+#stack_supply(dry_milk_plot, sa=FALSE, save=FALSE)
+
+
+
+## Масло сливочное
+# get units
+supply_data(categories[6], units=TRUE, trade_type = 'NETTO')
+# conversion factors to mln kilogramms 
+convert <- c(1/1000, 1/10^6, 1/10^6, 1/1000)
+# get data
+butter <- supply_data(categories[6], missing_interp=FALSE, convert=convert, taxcat = c('Поступило - федеральные, НДС',
+                                                                                         'Поступило - федеральные, НДФЛ',
+                                                                                         'Поступило - федеральные, прибыль',
+                                                                                         'Поступило - федеральные, акциз'), prodPriceGroups = list(
+                                                                                           c('15.51.30.001', '10.51.30.110')
+                                                                                         ))
+# first look
+all_plots(plotter(butter, ed='млн кг.'), save=TRUE)
+# 1
+butter$production$value <- na_seasplit(ts(butter$production$value, start=c(2010,1), freq=12))
+# 2
+butter$stocks$value[c(138)] <- NA
+butter$stocks$value[c(138)] <- mean(butter$stocks$value[c(137,139)])
+ts.plot(butter$stocks$value)
+#3
+butter$production_FD <- butter$production_FD %>% arrange(date)
+for (i in unique(butter$production_FD$OKATO_id)) {
+  sub <- butter$production_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  temp[which(zoo::index(temp)==as.Date('2022-03-01'))] <- NA
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  butter$production_FD[butter$production_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+butter$production_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+# 4
+butter$retail_FD <- butter$retail_FD %>% arrange(date)
+for (i in unique(butter$retail_FD$OKATO_id)) {
+  sub <- butter$retail_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  butter$retail_FD[butter$retail_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+butter$retail_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+# 5 
+butter$export$value[9] <- NA
+butter$export$value <- na_seasplit(ts(butter$export$value, start=c(2014,1), freq=12))
+# better look
+all_plots(plotter(butter, ed='млн кг.'), save=TRUE)
+# prepare data for plotting
+butter_plot <- prepare_data(butter, ed='млн кг.', ed_tradeprice = 'кг.')
+butter_plot <- counterfeitCalc(butter_plot)
+butter_plot <- estMeanChange(butter_plot)
+# combined graph
+#stack_supply(butter_plot, sa=TRUE, save=FALSE)
+#stack_supply(butter_plot, sa=FALSE, save=FALSE)
+
+
+## Сыры
+# get units
+supply_data(categories[7], units=TRUE, trade_type = 'NETTO')
+# conversion factors to mln kilogramms 
+convert <- c(1/1000, 1/10^6, 1/10^6, 1/1000)
+# get data
+cheese <- supply_data(categories[7], missing_interp=FALSE, convert=convert, taxcat = c('Поступило - федеральные, НДС',
+                                                                                       'Поступило - федеральные, НДФЛ',
+                                                                                       'Поступило - федеральные, прибыль',
+                                                                                       'Поступило - федеральные, акциз'), prodPriceGroups = list(
+                                                                                         c('15.51.40.250', '10.51.40.170'),
+                                                                                         c('15.51.40.160', '10.51.40.120'),
+                                                                                         c('15.51.40.170', '10.51.40.130'), 
+                                                                                         c('15.51.40.290'),
+                                                                                         c('15.51.40.310', '10.51.40.210'),
+                                                                                         c('10.51.40.110'),
+                                                                                         c('10.51.40.160')
+                                                                                       ))
+# first look
+all_plots(plotter(cheese, ed='млн кг.'), save=TRUE)
+# 1
+cheese$production$value <- na_seasplit(ts(cheese$production$value, start=c(2010,1), freq=12))
+# 2
+cheese$stocks$value[c(95)] <- NA
+cheese$stocks$value[c(95)] <- mean(cheese$stocks$value[c(94,96)])
+cheese$stocks$value[c(104)] <- NA
+cheese$stocks$value[c(104)] <- mean(cheese$stocks$value[c(103,105)])
+ts.plot(cheese$stocks$value)
+#3
+cheese$production_FD <- cheese$production_FD %>% arrange(date)
+for (i in unique(cheese$production_FD$OKATO_id)) {
+  sub <- cheese$production_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  temp[which(zoo::index(temp)==as.Date('2022-03-01'))] <- NA
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  cheese$production_FD[cheese$production_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+cheese$production_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+# 4
+cheese$retail_FD <- cheese$retail_FD %>% arrange(date)
+for (i in unique(cheese$retail_FD$OKATO_id)) {
+  sub <- cheese$retail_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  cheese$retail_FD[cheese$retail_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+cheese$retail_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+# better look
+all_plots(plotter(cheese, ed='млн кг.'), save=TRUE)
+# prepare data for plotting
+cheese_plot <- prepare_data(cheese, ed='млн кг.', ed_tradeprice = 'кг.')
+cheese_plot <- counterfeitCalc(cheese_plot)
+cheese_plot <- estMeanChange(cheese_plot)
+# combined graph
+#stack_supply(cheese_plot, sa=TRUE, save=FALSE)
+#stack_supply(cheese_plot, sa=FALSE, save=FALSE)
+
+
+## Творог
+# get units
+supply_data(categories[8], units=TRUE, trade_type = 'NETTO')
+# conversion factors to mln kilogramms 
+convert <- c(1/1000, 1/10^6, 1/10^6, 1/1000)
+# get data
+cotCheese <- supply_data(categories[8], missing_interp=FALSE, convert=convert, taxcat = c('Поступило - федеральные, НДС',
+                                                                                       'Поступило - федеральные, НДФЛ',
+                                                                                       'Поступило - федеральные, прибыль',
+                                                                                       'Поступило - федеральные, акциз'), prodPriceGroups = list(
+                                                                                         c('15.51.40.110', '10.51.40.310')
+                                                                                       ))
+# first look
+all_plots(plotter(cotCheese, ed='млн кг.'), save=TRUE)
+# 1
+cotCheese$production$value <- na_seasplit(ts(cotCheese$production$value, start=c(2010,1), freq=12))
+# 2
+# cotCheese$stocks$value[c(95)] <- NA
+# cotCheese$stocks$value[c(95)] <- mean(cotCheese$stocks$value[c(94,96)])
+# cotCheese$stocks$value[c(104)] <- NA
+# cotCheese$stocks$value[c(104)] <- mean(cotCheese$stocks$value[c(103,105)])
+# ts.plot(cotCheese$stocks$value)
+#3
+cotCheese$production_FD <- cotCheese$production_FD %>% arrange(date)
+for (i in unique(cotCheese$production_FD$OKATO_id)) {
+  sub <- cotCheese$production_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  temp[which(zoo::index(temp)==as.Date('2022-03-01'))] <- NA
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  cotCheese$production_FD[cotCheese$production_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+cotCheese$production_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+# better look
+all_plots(plotter(cotCheese, ed='млн кг.'), save=TRUE)
+# prepare data for plotting
+cotCheese_plot <- prepare_data(cotCheese, ed='млн кг.', ed_tradeprice = 'кг.')
+cotCheese_plot <- counterfeitCalc(cotCheese_plot)
+cotCheese_plot <- estMeanChange(cotCheese_plot)
+# combined graph
+stack_supply(cotCheese_plot, sa=TRUE, save=FALSE)
+#stack_supply(cotCheese_plot, sa=FALSE, save=FALSE)
+
+
+## Сгущеное молоко
+# get units
+supply_data(categories[9], units=TRUE, trade_type = 'NETTO')
+# conversion factors to mln cans
+convert <- c(1/1000, 2.5 / 10^6, 2.5 / 10^6, 1/1000)
+# get data
+condensedMilk <- supply_data(categories[9], missing_interp=FALSE, convert=convert, taxcat = c('Поступило - федеральные, НДС',
+                                                                                       'Поступило - федеральные, НДФЛ',
+                                                                                       'Поступило - федеральные, прибыль',
+                                                                                       'Поступило - федеральные, акциз'), filterEI = 'Тысяча условных банок', prodPriceGroups = list(
+                                                                                         c('15.51.51', '10.51.51')
+                                                                                       )
+                             )
+# first look
+all_plots(plotter(condensedMilk, ed='млн усл. банок'), save=TRUE)
+# 1
+condensedMilk$production$value <- na_seasplit(ts(condensedMilk$production$value, start=c(2010,1), freq=12))
+# 2
+condensedMilk$import$value[c(64)] <- mean(condensedMilk$import$value[c(63,65)])
+#3
+condensedMilk$production_FD <- condensedMilk$production_FD %>% arrange(date)
+for (i in unique(condensedMilk$production_FD$OKATO_id)) {
+  sub <- condensedMilk$production_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  temp[which(zoo::index(temp)==as.Date('2022-03-01'))] <- NA
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  condensedMilk$production_FD[condensedMilk$production_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+condensedMilk$production_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+# better look
+all_plots(plotter(condensedMilk, ed='млн усл. банок'), save=TRUE)
+# prepare data for plotting
+condensedMilk_plot <- prepare_data(condensedMilk, ed='млн усл. банок', ed_tradeprice = 'кг.')
+condensedMilk_plot <- counterfeitCalc(condensedMilk_plot)
+condensedMilk_plot <- estMeanChange(condensedMilk_plot)
+# combined graph
+# stack_supply(condensedMilk_plot, sa=TRUE, save=FALSE)
+# stack_supply(condensedMilk_plot, sa=FALSE, save=FALSE)
+
+
+## Кисломолочные продукты
+# get units
+supply_data(categories[10], units=TRUE, trade_type = 'NETTO')
+# conversion factors to mln kilogramms 
+convert <- c(1/1000, 1/10^6, 1/10^6, 1/1000)
+# get data
+sourMilk <- supply_data(categories[10], missing_interp=FALSE, convert=convert, taxcat = c('Поступило - федеральные, НДС',
+                                                                                              'Поступило - федеральные, НДФЛ',
+                                                                                              'Поступило - федеральные, прибыль',
+                                                                                              'Поступило - федеральные, акциз'), prodPriceGroups = list(
+                                                                                                c('15.51.52'),
+                                                                                                c('10.51.52.100'),
+                                                                                                c('10.51.52.200')
+                                                                                              ))
+# first look
+all_plots(plotter(sourMilk, ed='млн кг.'), save=TRUE)
+# 1
+sourMilk$production$value <- na_seasplit(ts(sourMilk$production$value, start=c(2010,1), freq=12))
+# 2
+sourMilk$stocks$value[c(111)] <- NA
+sourMilk$stocks$value[c(111)] <- mean(sourMilk$stocks$value[c(110,112)])
+ts.plot(sourMilk$stocks$value)
+#3
+sourMilk$production_FD <- sourMilk$production_FD %>% arrange(date)
+for (i in unique(sourMilk$production_FD$OKATO_id)) {
+  sub <- sourMilk$production_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  temp[which(zoo::index(temp)==as.Date('2022-03-01'))] <- NA
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  sourMilk$production_FD[sourMilk$production_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+sourMilk$production_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+# 4
+sourMilk$import$value[44] <- mean(sourMilk$import$value[c(43,45)])
+# better look
+all_plots(plotter(sourMilk, ed='млн кг.'), save=TRUE)
+# prepare data for plotting
+sourMilk_plot <- prepare_data(sourMilk, ed='млн кг.', ed_tradeprice = 'кг.')
+sourMilk_plot <- counterfeitCalc(sourMilk_plot)
+sourMilk_plot <- estMeanChange(sourMilk_plot)
+# combined graph
+#stack_supply(sourMilk_plot, sa=TRUE, save=FALSE)
+#stack_supply(sourMilk_plot, sa=FALSE, save=FALSE)
+
+
+## Мороженое
+# get units
+supply_data(categories[12], units=TRUE, trade_type = 'NETTO')
+# conversion factors to mln kilogramms 
+convert <- c(1/1000, 1/10^6, 1/10^6, 1/1000)
+# get data
+iceCream <- supply_data(categories[12], missing_interp=FALSE, convert=convert, taxcat = c('Поступило - федеральные, НДС',
+                                                                                          'Поступило - федеральные, НДФЛ',
+                                                                                          'Поступило - федеральные, прибыль',
+                                                                                          'Поступило - федеральные, акциз'), prodPriceGroups = list(
+                                                                                            c('15.52', '10.52.10')
+                                                                                          ))
+# first look
+all_plots(plotter(iceCream, ed='млн кг.'), save=TRUE)
+# 1
+iceCream$production$value <- na_seasplit(ts(iceCream$production$value, start=c(2010,1), freq=12))
+#2
+iceCream$production_FD <- iceCream$production_FD %>% arrange(date)
+for (i in unique(iceCream$production_FD$OKATO_id)) {
+  sub <- iceCream$production_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  temp[which(zoo::index(temp)==as.Date('2022-03-01'))] <- NA
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  iceCream$production_FD[iceCream$production_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+iceCream$production_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+#3
+iceCream$retail_FD <- iceCream$retail_FD %>% arrange(date)
+iceCream$retail_FD <- iceCream$retail_FD[-c(208:216),]
+iceCream$retail_FD <- iceCream$retail_FD[-c(208:216),]
+iceCream$retail_FD <- iceCream$retail_FD[-c(217:225),]
+iceCream$retail_FD <- iceCream$retail_FD[-c(235:243),]
+
+for (i in unique(iceCream$retail_FD$OKATO_id)) {
+  sub <- iceCream$retail_FD %>% filter(OKATO_id == i) %>% arrange(date)
+  temp <- zoo(sub$value, order.by=sub$date, frequency = 12)
+  temp[which(zoo::index(temp)==as.Date('2022-03-01'))] <- NA
+  library(imputeTS)
+  fit <- na_seasplit(temp)
+  iceCream$retail_FD[iceCream$retail_FD$OKATO_id == i, 'value'] <- as.numeric(fit)
+}
+iceCream$retail_FD %>% ggplot() +
+  geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+  theme(legend.position='none')
+# 4
+iceCream$import$value[c(88,89)] <- NA
+iceCream$import$value <- na_seasplit(ts(iceCream$import$value, start=c(2014,1), freq=12))
+# better look
+all_plots(plotter(iceCream, ed='млн кг.'), save=TRUE)
+# prepare data for plotting
+iceCream_plot <- prepare_data(iceCream, ed='млн кг.', ed_tradeprice = 'кг.')
+iceCream_plot <- counterfeitCalc(iceCream_plot)
+iceCream_plot <- estMeanChange(iceCream_plot)
+# combined graph
+#stack_supply(iceCream_plot, sa=TRUE, save=FALSE)
+#stack_supply(iceCream_plot, sa=FALSE, save=FALSE)
+
+
+
+# # ANALYZE COUNTERFEIT BY ORIGIN COUNTRY
+# eeu <- c('AM', 'BY', 'KZ', 'KG')
+# sub <- keys[keys$name=='Сигареты и папиросы',]
+# tn_keys <- as.character(unique(sub$TNVED[!is.na(sub$TNVED)]))
+# 
+# fts_dat <- fts %>%
+#   filter(TNVED %in% tn_keys) %>%
+#   filter(STRANA == 'KZ') %>%
+#   mutate(PERIOD = as.Date(PERIOD)) %>%
+#   group_by(STRANA, PERIOD, NAPR) %>%
+#   summarize(STOIM = sum(STOIM, na.rm=T), KOL = sum(KOL, na.rm=T), NETTO = sum(NETTO, na.rm=T), .groups='keep') %>%
+#   filter(NAPR == 'ИМ')
+# 
+# mirr_dat <- mirror %>%
+#   filter(TNVED %in% tn_keys) %>%
+#   filter(STRANA %in% eeu) %>%
+#   group_by(STRANA, PERIOD, NAPR) %>%
+#   summarize(STOIM = sum(STOIM, na.rm=T), KOL = sum(KOL, na.rm=T), NETTO = sum(NETTO, na.rm=T), .groups='keep') %>%
+#   filter(NAPR == 'ИМ')
+# 
+# 
+# mirr_dat %>% select(PERIOD, STOIM) %>%
+#   left_join(fts_dat %>% select(PERIOD, STOIM), by='PERIOD') %>%
+#   ggplot() +
+#   geom_line(aes(x=PERIOD, y=STOIM.x, group=1), col='red') +
+#   geom_line(aes(x=PERIOD, y=STOIM.y, group=2), col='blue')
+  
+
+
+#---------------------------------------------------------------------------------------------------
+# COPY UPDATED FILES TO APP FOLDER
+#---------------------------------------------------------------------------------------------------
+
+current_folder <- 'data_output/supply_analysis'
+# new_folder <- 'app/data_output/supply_analysis'
+new_folder2 <- 'infl_dashboard_app/data_output/supply_analysis'
+list_of_files <- list.files(current_folder, '') 
+
+# Manually assign group names for models
+market_groups <- data.frame(model = list_of_files[-which(list_of_files=='market_groups.xlsx')], group = NA)
+market_groups$group[c(2:6, 8:10)] <- 'Молочная продукция'
+market_groups$group[1] <- 'Прочее, продовольственное'
+market_groups$group[7] <- 'Прочее, непродовольственное'
+market_groups <- market_groups[order(market_groups$group),]
+# Order according to display preferences on the dashboard
+market_groups <- market_groups[c(3, 2, 7, 8, 1, 6, 5, 4, 10, 9),]
+write_xlsx(market_groups, 'data_output/supply_analysis/market_groups.xlsx')
+
+# file.copy(file.path(current_folder,list_of_files), new_folder, overwrite=TRUE, recursive=TRUE)
+file.copy(file.path(current_folder,list_of_files), new_folder2, overwrite=TRUE, recursive=TRUE)
+
+
+
+
+
+
+
+# a <- load_data(57709)
+# names(a) <- c('OKATO', 'OKATO_id', 'OKPD', 'OKPD_id', 'type', 'EI', 'period', 'year', 'value')
+# a <- conv_date(a, 7, 8, type='monthly')
+# b <- load_data(31106)
+# names(b) <- c('OKATO', 'OKATO_id', 'OKPD', 'OKPD_id', 'type', 'EI', 'period', 'year', 'value')
+# b <- conv_date(b, 7, 8, type='monthly')
+# itog <- rbind(a, b)
+# saveRDS(itog, 'constrPriceInd.RDS')
+
+
+
+

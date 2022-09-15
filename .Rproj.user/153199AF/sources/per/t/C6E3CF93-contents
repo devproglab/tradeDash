@@ -1,0 +1,2585 @@
+#---------------------------------------------------------------------------------------------------
+# GENERIC FUNCTIONS and settings
+#---------------------------------------------------------------------------------------------------
+options(encoding = "UTF-8")
+# using() install missing libraries and load all the rest ----------------------
+using <- function(...) {
+  libs <- unlist(list(...))
+  req <- unlist(lapply(libs,require,character.only=TRUE))
+  need <- libs[req==FALSE]
+  if (length(need)>0) { 
+    install.packages(need)
+    lapply(need,require,character.only=TRUE)
+  }
+}
+# attach all necessary packages  -----------------------------------------------
+using("data.table", "readxl", "dplyr", "xts", "plotly", "KFAS", "seasonal", "stats",
+      "lubridate", "xml2", "stringr", "readtext", "rvest",  "readr", "prophet", "tsibble", 
+      "fable", "fable.prophet", "timeDate", "feasts", "imputeTS", "ISOweek", "TSstudio", "stringr",
+      "forecast", "ggplot2", "tsbox", "tempdisagg", "writexl", "Quandl", 'mcGlobaloptim', 'foreign', 'imputeTS')
+# saveit() save object as .RData file to specified location  --------------------------
+saveit <- function(..., where, string) {
+  x <- list(...)
+  names(x) <- string
+  save(list=names(x), file=paste(where, string, '.RData', sep=''), envir=list2env(x))
+}
+# loadR() load an estimated model into a separate variable ---------------------
+loadR <- function(fileName, where='./data_output/models/'){
+  fileName <- paste(where, fileName, '.RData', sep='')
+  load(fileName)
+  get(ls()[ls() != "fileName"])
+}
+# choose ggplot theme and disable scientific notation --------------------------
+theme_set(theme_minimal())
+options(scipen=999)
+
+#---------------------------------------------------------------------------------------------------
+# INFLATION ANALYSIS-RELATED FUNCTIONS
+#---------------------------------------------------------------------------------------------------
+
+# gen_report() display most recent dates for each dataset ----------------------
+gen_report <- function() {
+  # single files
+  current_folder <- 'data_inputs/single'
+  list_of_files <- list.files(current_folder, '') 
+  l_date <- matrix(ncol=2, nrow=length(list_of_files))
+  l_date <- data.frame(l_date)
+  for (i in list_of_files) {
+    file <- data.frame(read_excel(paste(current_folder,i,sep='/')))
+    l_date[which(list_of_files==i),1] <- i
+    l_date[which(list_of_files==i),2] <- as.character(ymd(last(file[,1])))
+  }
+  current_folder <- 'data_inputs/long'
+  list_of_files <- list.files(current_folder, '') 
+  l_date2 <- matrix(ncol=2, nrow=length(list_of_files))
+  l_date2 <- data.frame(l_date2)
+  for (i in list_of_files) {
+    file <- data.frame(read_excel(paste(current_folder,i,sep='/')))
+    l_date2[which(list_of_files==i),1] <- i
+    if (!i=='price_structure_long.xlsx') {
+      l_date2[which(list_of_files==i),2] <- as.character(ymd(max(file$date)))
+    } else {
+      l_date2[which(list_of_files==i),2] <- max(file$date)
+    }
+  }
+  l_date <- rbind(l_date, l_date2)
+  names(l_date) <- c('file', 'last_updated')
+  write_xlsx(l_date, 'data_output/last_updated.xlsx')
+  return(l_date)
+}
+# make_weekly() transform "wide" weekly panel dataset into a readable "long" one----
+make_weekly <- function(changelist = NULL) {
+  
+  # data from fedstat
+  weekly <- read_excel(paste('./data_inputs/panel/prices_weekly2.xlsx', sep=''), col_names=FALSE)
+  dates <- c(t(as.vector(weekly[1,][-1])))
+  dates <- str_extract(dates, '(?<=\\()[^{}]+(?=\\))')
+  w <- which(str_detect(dates,'(на 17сентября 2018 года)'))
+  dates[w] <- paste('на 17', substr(dates[w], 6, nchar(dates[w])))
+  dates <- str_extract(dates, '(|.)\\d .* \\d\\d\\d\\d')
+  dates <- str_trim(dates)
+  
+  day <- str_extract(dates, '([0-9]+)')
+  month <- str_trim(str_extract(dates, '(?<=\\d) .*\\b (?=\\d\\d\\d\\d)'))
+  year <- str_extract(dates, '(\\d\\d\\d\\d)')
+  
+  cyr_month <- c('янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сент', 'окт', 'ноя', 'дек')
+  en_month <- c('01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12')
+  for (i in 1:12) {
+    month[which(str_detect(month, cyr_month[i]))] <- en_month[i]
+  }
+  
+  ymd <- ceiling_date(as.Date(paste(day, month, year, sep=' '), format='%d %m %Y'), unit='weeks', week_start=1)
+  weekly <- data.frame(weekly[-1,])
+  weekly[,-1] <- apply(weekly[,-1], 2, as.numeric)
+  names(weekly) <- c('id', format(ymd, '%Y-%m-%d'))
+  weekly <- reshape2::melt(weekly, id=c("id"), variable.name = "date", value.name = "value")
+  weekly$date <- as.Date(weekly$date)
+  weekly <- weekly[order(weekly$date),]
+  # data from bi.gks.ru
+  
+  weekly2 <- read_excel('./data_inputs/panel/bi_gks1.xlsx', col_names=FALSE)
+  weekly2 <- tail(weekly2, -7)
+  names(weekly2) <- c('id', format(as.Date(substr(as.character(weekly2[1,-1]), 1, 10), '%d.%m.%Y'), '%Y-%m-%d'))
+  weekly2 <- weekly2[-1,]
+  weekly2[,-1] <- apply(weekly2[,-1], 2, as.numeric)
+  weekly2 <- reshape2::melt(weekly2, id=c("id"), variable.name = "date", value.name = "value")
+  weekly2$date <- as.Date(weekly2$date)
+  weekly2 <- weekly2[order(weekly2$date),]
+  
+  weekly3 <- read_excel('./data_inputs/panel/bi_gks2.xlsx', col_names=FALSE)
+  weekly3 <- tail(weekly3, -7)
+  names(weekly3) <- c('id', format(as.Date(substr(as.character(weekly3[1,-1]), 1, 10), '%d.%m.%Y'), '%Y-%m-%d'))
+  weekly3 <- weekly3[-1,]
+  weekly3[,-1] <- apply(weekly3[,-1], 2, as.numeric)
+  weekly3 <- reshape2::melt(weekly3, id=c("id"), variable.name = "date", value.name = "value")
+  weekly3$date <- as.Date(weekly3$date)
+  weekly3 <- weekly3[order(weekly3$date),]
+  
+  weekly4 <- read_excel('./data_inputs/panel/bi_gks3.xlsx', col_names=FALSE)
+  weekly4 <- tail(weekly4, -7)
+  names(weekly4) <- c('id', format(as.Date(substr(as.character(weekly4[1,-1]), 1, 10), '%d.%m.%Y'), '%Y-%m-%d'))
+  weekly4 <- weekly4[-1,]
+  weekly4[,-1] <- apply(weekly4[,-1], 2, as.numeric)
+  weekly4 <- reshape2::melt(weekly4, id=c("id"), variable.name = "date", value.name = "value")
+  weekly4$date <- as.Date(weekly4$date)
+  weekly4 <- weekly4[order(weekly4$date),]
+  
+  week_all <- rbind(weekly, weekly2, weekly3, weekly4)
+  if (!is.null(changelist)) {
+    for (i in 1:length(changelist)) {
+      filt <- changelist[[i]]
+      week_all <- week_all %>%
+        filter(! ( (id==filt[1]|id==filt[2]) & is.na(value))) %>% mutate(id = case_when(
+          id==filt[2] ~ filt[1],
+          TRUE ~ id
+        ))
+    }
+  }
+  write_xlsx(week_all, paste('./data_inputs/long/prices_weekly_long.xlsx', sep=''))
+  
+}
+# make_monthly() transform "wide" monthly panel dataset into a readable "long" one----
+make_monthly <- function(name, start="1899-12-30") {
+  monthly <- read_excel(paste('./data_inputs/panel/', name, '.xlsx', sep=''), col_names=FALSE)
+  meta <- monthly[,1]
+  monthly <- monthly[,-1]
+  monthly <- as.data.frame(t(monthly))
+  monthly[,2:length(monthly)] <- sapply(monthly[,2:length(monthly)], as.numeric)
+  monthly[,1] <- as.Date(monthly[,1], origin = "1899-12-30")
+  monthly <- as.data.frame(cbind(meta, t(monthly)))
+  names(monthly) <- monthly[1,]
+  monthly <- monthly[-1,]
+  if (name=='wages') {
+    cpi <- Quandl("RATEINF/CPI_RUS", api_key="8Wztb5pSRV5aLNZsWT9z", type = 'xts')
+    cpi <- cpi[(zoo::index(cpi)>='янв 2015')&(zoo::index(cpi)<=as.yearmon(last(names(monthly))))]
+    monthly <- t(monthly)
+    monthly[-1,] <- as.numeric(monthly[-1,]) / as.numeric(cpi)
+    monthly[-1,] <- as.numeric(monthly[-1,]) * as.numeric(last(cpi))
+    monthly <- t(monthly)
+    monthly <- data.frame(monthly, check.names = FALSE)
+  } 
+  monthly <- reshape2::melt(monthly, id=c("id"), variable.name = "date", value.name = "value")
+  monthly$date <- as.Date(monthly$date)
+  monthly$value <- as.numeric(monthly$value)
+  monthly <- monthly[complete.cases(monthly),]
+  monthly <- monthly[monthly$date>=as.Date(start),]
+  write_xlsx(monthly, paste('./data_inputs/long/', name, '_long.xlsx', sep=''))
+}
+# update_price_str() transform "wide" price structure dataset into a readable "long" one----
+update_price_str <- function(last_year=2019) {
+  df <- read_excel('./data_inputs/panel/price_structure.xlsx', col_names=FALSE)
+  for (i in 2014:last_year) {
+    delta <- i - 2014
+    subset <- cbind(df[-1,1], df[-1,-1][,(11*delta+1):(11*(delta+1))])
+    subset[is.na(subset)] <- 0
+    subset[,-1] <- apply(subset[,-1], 2, as.numeric)
+    subset[, 4] <- rowSums(subset[,4:6])
+    subset <- subset[,-c(5,6)]
+    subset <- subset[,-6]
+    names(subset) <- c('product', 'Стоимость сырья', 'Расходы на производство', 'Прибыль/убыток', 'НДС, акциз, иные налоги', 'Плата за доставку, осуществляемую переработчиком', 'Оборот посреднического звена', 'Торговая наценка', 'НДС, начисленный в рознице')
+    subset <- subset[-which(rowSums(subset[,-1])==0),c(1,2,9,3:8)]
+    subset_long <- reshape2::melt(subset, id.vars=c('product'))
+    subset_long$date <- i + 1
+    if (i==2014) {
+      final <- subset_long
+    } else {
+      final <- rbind(final,subset_long)
+    }
+  }
+  write_xlsx(final, './data_inputs/long/price_structure_long.xlsx')
+}
+# get_from_long() extract a particular series from a "long" dataset ------------
+get_from_long <- function(from, id, name, impute=FALSE) {
+  monthly <- read_excel(paste('./data_inputs/long/', from, '.xlsx', sep='') )
+  df <- data.frame(monthly[monthly$id==id,c(2,3)])
+  df$date = as.Date(df$date)
+  df <- df[order(df$date),]
+  rownames(df) <- df$date
+  df <- df[,-1, drop=FALSE]
+  df <- xts(df, order.by=as.Date(rownames(df)))
+  weekly <- str_detect(from, 'weekly')
+  if (!weekly) {
+    df <- apply.monthly(df, 'mean')
+    zoo::index(df) <- as.yearmon(zoo::index(df))
+  }
+  if (impute) {
+    if (!weekly) {
+      first_date <- as.Date(first(zoo::index(df)))
+      last_date <- as.Date(last(zoo::index(df)))
+      t <- lubridate::interval(first_date, last_date) %/% months(1) + 1
+      foo <- seq(from=1, by=1, length.out=t)
+      timeindex <- seq(first_date,
+                       last_date,
+                       by = '1 month')
+      ref <- xts(foo, order.by = timeindex)
+      df <- merge(df, ref)
+      df[,1] <- na_interpolation(df[, 1], option = "spline", method = "fmm")
+      df <- df[,1]
+    } else {
+      df[,1] <- na_interpolation(df[, 1], option = "spline", method = "fmm")
+    }
+  }
+  names(df) <- name
+  return(df)
+}
+# get_factor() extract a particular series from an .xlsx file dataset  ---------
+get_factor <- function(name, impute=FALSE, disagg=FALSE) {
+  df <- data.frame(read_excel(paste('./data_inputs/single/', name, '.xlsx', sep='')))
+  rownames(df) <- df$date
+  df <- as.xts(df, dateFormat="Date")
+  df <- df[,-1]
+  periodicity <- periodicity(df)$scale
+  df <- apply.monthly(df, 'mean')
+  if (impute) {
+    t <- lubridate::interval(as.Date('2015-01-01'), today()) %/% months(1) + 1
+    foo <- seq(from=1, by=1, length.out=t)
+    timeindex <- seq(ymd('2015-01-01'),
+                     today(),
+                     by = '1 month')
+    ref <- xts(foo, order.by = timeindex, dateFormat="Date")
+    df <- merge(df, ref)
+    df[,1] <- na_interpolation(df[, 1], option = "spline")
+    df <- df[,1]
+  }
+  if (disagg) {
+    if (periodicity=='quarterly') { 
+      freq=4
+      timeindex <- seq(ymd('2015-01-01'),
+                       as.Date(last(zoo::index(df))+months(3)),
+                       by = '1 month')
+    }
+    if (periodicity=='yearly') { 
+      freq=1 
+      timeindex <- seq(ymd('2015-01-01'),
+                       as.Date(last(zoo::index(df))+months(11)),
+                       by = '1 month')
+    }
+    dis <- td(ts(df, freq=freq) ~ 1, to = "monthly", method = "fast")
+    df <- xts(predict(dis), order.by=timeindex)
+  } else {
+    if (!periodicity=='weekly') {zoo::index(df) <- as.yearmon(zoo::index(df))} else {
+      zoo::index(df) <- as.yearmon(zoo::index(df))
+    }
+  }
+  names(df) <- name
+  return(df)
+}
+# get_fx_moex() parse exchange rate data from MOEX  ----------------------------
+get_fx_moex <- function(fx = "EUR/RUB", start_date = "2015-01-01", freq) {
+  url <- paste0(
+    "https://www.moex.com/export/derivatives/currency-rate.aspx?language=en&currency=",
+    fx,
+    "&moment_start=", start_date,
+    "&moment_end=", today()
+  )
+  data <- read_xml(url)
+  date <- xml_attr(xml_find_all(data, "//rtsdata/rates/rate"), "moment")
+  value <- xml_attr(xml_find_all(data, "//rtsdata/rates/rate"), "value")
+  exrate <- data.frame(cbind(date, value))
+  rownames(exrate) <- exrate$date
+  exrate <- as.xts(exrate)
+  exrate <- exrate[,-1]
+  if (freq=='monthly') {
+    exrate <- apply.monthly(exrate, 'mean')
+    zoo::index(exrate) <- as.yearmon(zoo::index(exrate))
+  } else if (freq=='weekly') {
+    exrate <- apply.weekly(exrate, 'mean')
+    zoo::index(exrate) <- ceiling_date(as.Date(zoo::index(exrate)), unit='weels', week_start = 1)
+  } else {
+    exrate <- apply.daily(exrate, 'mean')
+    zoo::index(exrate) <- as.Date(zoo::index(exrate))
+    q <- seq(first(zoo::index(exrate)), last(zoo::index(exrate)), by='1 day')
+    q <- xts(seq_along(q), order.by=q)
+    exrate <- merge(q, exrate)
+    exrate[,2] <- na_interpolation(exrate[,2], option='spline')
+    exrate <- exrate[,-1]
+  }
+  
+  names(exrate) <- 'exrate'
+  return(exrate)
+}
+# forecast_exog() forecast model's exogenous variables with a "best-choice" model----
+forecast_exog <- function(df, n.ahead = 4, type) {
+  df <- (Reduce(function(df1, df2) merge(df1, df2), df))
+  span <- max(which(!is.na(df[,1])))
+  if (nrow(df)>=span+n.ahead) {
+    df <- df[1:(span+n.ahead),]
+  }
+  last_date <- as.Date(zoo::index(df)[span])
+  if (!n.ahead==0) {
+    timespan <- seq(from=last_date+months(1), to=(last_date+months(n.ahead)), by='months')
+    new_df <- xts(data.frame(matrix(nrow=span+n.ahead, ncol=ncol(df))), order.by=c(as.Date(zoo::index(df)[1:span]), timespan))
+  } else {
+    timespan <- last_date
+    new_df <- xts(data.frame(matrix(nrow=span, ncol=ncol(df))), order.by=as.Date(zoo::index(df)[1:span]))
+  }
+  names(new_df) <- names(df)
+  reg_models <- choose_exog_forecast(df[,-1], type=type)
+  reg_models <- data.frame(reg_models[which(reg_models$variable %in% names(df[,-1])),])
+  reg_models$id <- 0
+  try(reg_models[reg_models$model=='prophet',]$id <- 1, silent=TRUE)
+  try(reg_models[reg_models$model=='arima',]$id <- 2, silent=TRUE)
+  try(reg_models[reg_models$model=='ets',]$id <- 3, silent=TRUE)
+  for (i in names(df[,-1])) {
+    span_reg <- max(which(!is.na(df[,i])))
+    last_date_reg <- as.Date(zoo::index(df)[span_reg])
+    n = lubridate::interval(last_date_reg, last(timespan)) %/% months(1)
+    if (n<=0) {
+      new_df[(1:span_reg+n),i] <- df[(1:span_reg+n),i]
+    } else {
+      new_df[(1:span_reg),i] <- df[(1:span_reg),i]
+      tibble <- df[1:span_reg,i] %>% fortify.zoo %>% as_tibble()
+      tibble$Index <- yearmonth(tibble$Index)
+      names(tibble) <- c('Index', 'value')
+      tibble <- as_tsibble(tibble)
+      fit <- tibble  %>%
+        model (
+          model = switch (reg_models[reg_models$variable==i,'model'],
+                          prophet = prophet(value ~ season("year")),
+                          arima = ARIMA(value, stepwise=TRUE, approximation=TRUE, order_constraint = (constant + d + D <= 3)),
+                          ets = ETS(value)
+          )
+        )
+      fc <- fit %>% forecast(h = n)
+      new_df[((span_reg+1):nrow(new_df)),i] <- fc$.mean
+    }
+  }
+  new_df[(1:length(df[,1])),1] <- df[,1]
+  return(new_df)
+}
+# choose_exog_forecast() find the "best-choice" model for a regressor by out-of-sample performance----
+choose_exog_forecast <- function(df, n.ahead=1, nmodels = 3, init = 50, type='raw') {
+  estimates <- try(read_xlsx(paste('./data_output/best_models_', type, '.xlsx', sep='')), silent=TRUE)
+  if (!("try-error" %in% class(estimates))) {
+    if (all(names(df) %in% estimates$variable)) {
+      return(estimates)
+    } else {
+      idx <- which(names(df) %in% estimates$variable)
+      if (!length(idx)==0) {
+        df <- df[,-idx]
+      }
+    }
+  }
+  selected <- data.frame(matrix(nrow=length(names(df)), ncol=8))
+  for (i in names(df)) {
+    span_reg <- max(which(!is.na(df[,i])))
+    tibble <- df[1:span_reg,i] %>% fortify.zoo %>% as_tibble()
+    tibble$Index <- yearmonth(tibble$Index)
+    names(tibble) <- c('Index', 'value')
+    tibble <- as_tsibble(tibble)
+    df_str <- stretch_tsibble(tibble, .init = init, .step = 1)
+    fit <- df_str  %>%
+      model (
+        prophet = prophet(value ~ season("year")),
+        arima = ARIMA(value, stepwise=TRUE, approximation = TRUE),
+        ets = ETS(value)
+      )
+    fc <- fit %>% forecast(h = n.ahead) %>% accuracy(tibble)  
+    fc <- fc[,c(1,4,5,7,8,9)]
+    mins <- matrix(apply(fc[,-c(1)], 2, min) , nrow=nmodels, ncol=5, byrow=TRUE)
+    fc_binary <- cbind(fc[,1], apply(fc[,-1] == mins, 2, as.integer))
+    selected[which(i == names(df)),1] <- i
+    bestmod <- fc_binary[,1][which.max(rowSums(fc_binary[,-1]))]
+    selected[which(i == names(df)),2] <- bestmod
+    selected[which(i == names(df)),3:7] <- fc[fc$.model==bestmod,-1]
+    selected[which(i == names(df)),8] <- sum(fc_binary[fc_binary$.model==bestmod,-1])
+  }
+  names(selected) <- c('variable', 'model', 'RMSE', 'MAE', 'MAPE', 'MASE', 'RMSSE', 'model_score')
+  if (!("try-error" %in% class(estimates))) {
+    selected <- rbind(selected, estimates)
+  }
+  write_xlsx(selected, paste('./data_output/best_models_', type, '.xlsx', sep=''))
+  return(selected)
+}
+# model_estimation() estimate a state-space model and make a forecast -----------
+model_estimation = function(df = df, pars) {
+  smoothpar <- as.numeric(pars['smoothpar'])
+  nsa <- pars[['nsa']]
+  dummy <- pars[['dummy']]
+  movingmean <- as.numeric(pars['movingmean'])
+  ar <- as.numeric(pars['ar'])
+  reset <- pars[['reset']]
+  model_name <- pars[['model_name']]
+  varlabels <- pars[['varlabels']]
+  n.ahead <- as.numeric(pars['n.ahead'])
+  conf.level <- as.numeric(pars['conf.level'])
+  price_str <- pars[['price_str']]
+  nosave <- pars[['nosave']]
+  weekly <- pars[['weekly']]
+  fcast_type <- pars[['fcast_type']]
+  monthly_prices <- pars[['monthly']]
+  
+  if(is.null(pars[['out_of_sample']])) {
+    out_of_sample <- FALSE
+  } else {
+    out_of_sample <- TRUE
+  }
+  
+  weights <- read_xlsx('./data_inputs/vesa.xlsx')
+  weight <- as.numeric(weights[weights[,1]==model_name,][,2])
+  if (model_name == 'Лекарственные средства, пачка') {
+    weight = 1.663
+  }
+  if (!weekly) {
+    df_list <- df
+    df <- forecast_exog(df_list, n.ahead=0, type='raw')
+    span <- max(which(!is.na(df[,1])))
+    
+    dfmod_unsmoothed = do.call(merge, lapply(df, function(x) {log(x/stats::lag(x))}))
+    dfmod_unsmoothed = dfmod_unsmoothed[-1,]
+    if (!n.ahead==0) {
+      expander <- xts( , order.by=seq(last(as.Date(zoo::index(dfmod_unsmoothed))+months(1)), by='month', length.out=n.ahead))
+    } else {
+      expander <- NA
+    }
+    dfmod_unsmoothed = merge(dfmod_unsmoothed, expander, fill = NA)
+    
+    start <- c(year(zoo::index(dfmod_unsmoothed))[1], month(zoo::index(dfmod_unsmoothed)[1]))
+    
+    t <- lapply(ts(dfmod_unsmoothed[(1:span-1),1], start=start, frequency=12), function(e) stl(e, s.window = 12, t.window=smoothpar))
+    seasonal <- as.xts(t[[1]][[1]][,'seasonal'])
+    noise <- as.xts(t[[1]][[1]][,'remainder'])
+    if (!n.ahead==0) {
+      dfmod_sa <- do.call(merge, lapply(ts(dfmod_unsmoothed[1:(span-1),-1], start=start, frequency=12), function(e) {as.xts(stl(e, s.window = 12, t.window=smoothpar)[[1]][,'trend'])} ))
+    } else {
+      dfmod_sa <- do.call(merge, lapply(ts(dfmod_unsmoothed[1:(span-1),-c(1, ncol(dfmod_unsmoothed))], start=start, frequency=12), function(e) {as.xts(stl(e, s.window = 12, t.window=smoothpar)[[1]][,'trend'])} ))
+    }
+    if (!is.null(nsa)) {
+      q = seq_along(zoo::index(dfmod_unsmoothed[1:(span-1),]))
+      smoothed = do.call(merge, lapply(dfmod_unsmoothed[1:(span-1),-1][,nsa, drop=FALSE], function(x) {
+        as.xts(loess(x~q, span = smoothpar*1.8/(lubridate::interval(first(zoo::index(dfmod_unsmoothed[1:(span-1),])), last(zoo::index(dfmod_unsmoothed[1:(span-1),]))) %/% months(1)), degree = 2)$fitted,
+               order.by = zoo::index(dfmod_unsmoothed[1:(span-1),]))
+      }))
+      dfmod_sa[,nsa] <- smoothed[1:(span-1),]
+    }
+    
+    dfmod_sa <- cbind(as.xts(t[[1]][[1]][,'trend']), dfmod_sa)
+    
+    if (!n.ahead==0) {
+      dfmod_sa <- as.list(dfmod_sa)
+      dfmod_sa <- forecast_exog(dfmod_sa, n.ahead=n.ahead, type='log_sa')
+    }
+    
+    names(dfmod_sa) <- names(df)
+    ## add specified dummy variables
+    if (!is.null(dummy)) {
+      vars <- ncol(dfmod_sa) - 1
+      for (i in 1:ncol(dummy)) {
+        if (!dummy[2,i]==2) {
+          if (as.Date(dummy[1,i]) <= nth(as.Date(zoo::index(dfmod_sa)), -2)) {
+            length <- ncol(dfmod_sa)
+            dfmod_sa$dummy <- abs(as.numeric(dummy[2,i]) - 1)
+            dfmod_sa[as.Date(zoo::index(dfmod_sa))>=as.Date(dummy[1,i]),]$dummy <- as.numeric(dummy[2,i])
+            dfmod_unsmoothed$dummy <- abs(as.numeric(dummy[2,i]) - 1)
+            dfmod_unsmoothed[as.Date(zoo::index(dfmod_unsmoothed))>=(dummy[1,i]),]$dummy <- as.numeric(dummy[2,i])   
+            names(dfmod_sa)[length+1] <- colnames(dummy)[i]
+            names(dfmod_unsmoothed)[length+1] <- colnames(dummy)[i]
+          } else {
+            varlabels <- varlabels[-(vars + i)]
+          }
+        } else {
+          if (as.Date(dummy[1,i]) <= nth(as.Date(zoo::index(dfmod_sa)), -2)) {
+            span <- as.numeric(dummy[3,i])
+            length <- ncol(dfmod_sa)
+            dfmod_sa$dummy <- 0
+            dfmod_sa[(as.Date(zoo::index(dfmod_sa))>=as.Date(dummy[1,i])-months(span))&(as.Date(zoo::index(dfmod_sa))<=as.Date(dummy[1,i])+months(span)),]$dummy <- 1
+            dfmod_unsmoothed$dummy <- 0
+            dfmod_unsmoothed[(as.Date(zoo::index(dfmod_unsmoothed))>=as.Date(dummy[1,i])-months(span))&(as.Date(zoo::index(dfmod_unsmoothed))<=as.Date(dummy[1,i])+months(span)),]$dummy <- 1 
+            names(dfmod_sa)[length+1] <- colnames(dummy)[i]
+            names(dfmod_unsmoothed)[length+1] <- colnames(dummy)[i]
+          } else {
+            varlabels <- varlabels[-(vars + i)]
+          }
+        }
+      }
+    }
+  } else {
+    df_list <- df
+    x_w <- data.frame(date=zoo::index(df[[1]]), df[[1]])
+    w <- ifelse(nchar(isoweek(x_w$date))==1, paste(0, isoweek(x_w$date), sep=''), isoweek(x_w$date))
+    x_w$date <- ISOweek2date(paste(year(x_w$date), '-W', w, '-1', sep=''))
+    
+    ref <- data.frame(date=ceiling_date(seq(from=as.Date(paste(year(df[[1]])[1], '01', '01', sep='-')), 
+                                            to=last(as.Date(zoo::index(df[[1]])))+weeks(n.ahead), by='week'), unit='weeks', week_start=1))
+    
+    x_w <- merge(ref, x_w, all=TRUE)
+    x_w <- xts(x_w[,-1, drop=FALSE], order.by=x_w[,1])
+    x_w <- na_locf(x_w)
+    if (!n.ahead==0) {
+      x_w[(nrow(x_w)-n.ahead+1):nrow(x_w)] <- NA
+    }
+    prices_complete <- x_w[1:(nrow(x_w)-n.ahead)]
+    x_w <- diff(log(x_w), lag=1)
+    x_w <- x_w[-1,]
+    
+    # Get monthly factors and impute if last values missing
+    x_m <- (Reduce(function(df1, df2) merge(df1, df2), df_list[-1]))
+    span <- as.yearmon(last(zoo::index(x_w[!is.na(x_w[,1])])))
+    x_m <- x_m[zoo::index(x_m)<=as.yearmon(span),]
+    x_m$n <- seq(1, nrow(x_m), 1)
+    x_m <- x_m[,c(ncol(x_m), 1:(ncol(x_m)-1))]
+    x_m <- as.list(x_m)
+    x_m <- forecast_exog(x_m, n.ahead=0, type='raw') 
+    x_m <-  do.call(merge, lapply(x_m, function(x) {log(x/stats::lag(x))}))[-1,-1]
+    
+    x_m_add <- x_m
+    zoo::index(x_m_add) <- ceiling_date(as.Date(zoo::index(x_m_add)), unit='weeks', week_start=1)
+    dfmod_unsmoothed <- merge(x_w, x_m_add, all=TRUE)
+    
+    start <- c(year(zoo::index(dfmod_unsmoothed))[1], month(zoo::index(dfmod_unsmoothed)[1]))
+    x_m_sa <- do.call(merge, lapply(ts(x_m, start=start, frequency=12), function(e) {xts(stl(e, s.window = 12, t.window=smoothpar)[[1]][,'trend'], order.by=zoo::index(x_m))} ))
+    if (!is.null(nsa)) {
+      q = seq_along(zoo::index(x_m))
+      smoothed = do.call(merge, lapply(x_m[,nsa, drop=FALSE], function(x) {
+        as.xts(loess(x~q, span = smoothpar*1.8/(lubridate::interval(first(zoo::index(x_m)), last(zoo::index(x_m))) %/% months(1)), degree = 2)$fitted,
+               order.by = zoo::index(x_m))
+      }))
+      x_m_sa[,nsa] <- smoothed
+    }
+    
+    n <- lubridate::interval(last(zoo::index(x_m_sa[!is.na(x_m_sa[,1])])), last(zoo::index(x_w)) ) %/% months(1)
+    x_m_sa$n <- seq(1, nrow(x_m_sa), 1)
+    x_m_sa <- x_m_sa[,c(ncol(x_m_sa), 1:(ncol(x_m_sa)-1))]
+    x_m_sa <- as.list(x_m_sa)
+    if (!n.ahead==0) {
+      x_m_sa <- forecast_exog(x_m_sa, n.ahead=n, type='log_sa')[,-1]
+    } else {
+      x_m_sa <- forecast_exog(x_m_sa, n.ahead=0, type='log_sa')[,-1]
+    }
+    
+    disagg_sa <- do.call(merge, lapply(x_m_sa, function(e) {predict(td(e ~ 1, conversion = 'sum', to='day', method='fast'))}))
+    disagg_sa <- data.frame(disagg_sa)
+    disagg_w_sa <- disagg_sa %>%
+      group_by(
+        time = paste(isoyear(rownames(disagg_sa)), isoweek(rownames(disagg_sa)))
+      ) %>%
+      summarize_all(sum)
+
+    
+    
+    #
+    # disagg_w_sa$year <- as.numeric(substr(disagg_w_sa$time, 1, 4))
+    # disagg_w_sa$week <- as.numeric(substr(disagg_w_sa$time, 6, 7))
+    # disagg_w_sa <- disagg_w_sa[order(disagg_w_sa$year, disagg_w_sa$week),]
+    # idx <- first(which(isoweek(ref[,1])==disagg_w_sa$week[1]))
+    # len <- length(idx:length(ref$date))
+    # disagg_w_sa <- xts(disagg_w_sa[1:len, 2:(ncol(x_m_sa)+1)], order.by=ref$date[idx:length(ref$date)])
+    # names(disagg_w_sa) <- names(x_m_sa)
+    #
+    
+    
+    len <- max(which(!is.na(x_w[,1])))
+    start <- c(year(zoo::index(x_w))[1],isoweek(zoo::index(x_w)[1]))
+    t <- lapply(ts(x_w[1:len,1], start=start, frequency=52), function(e) stl(e, s.window = 12, t.window=smoothpar))
+    seasonal <- xts(t[[1]][[1]][,'seasonal'], order.by=zoo::index(x_w[1:len]))
+    noise <- xts(t[[1]][[1]][,'remainder'], order.by=zoo::index(x_w[1:len]))
+    trend <- xts(c(t[[1]][[1]][,'trend'], rep(NA, n.ahead)), order.by=zoo::index(x_w))
+    
+    
+    trend_supp <- as.data.frame(trend) %>%
+      mutate(
+        time = paste(isoyear(rownames(data.frame(trend))), isoweek(rownames(data.frame(trend))))
+      )
+    
+    date_yw <- head(data.frame(date = as.Date(rownames(trend_supp)) + days(7), time = trend_supp$time),-1)
+    
+    disagg_w_sa <- merge(disagg_w_sa, date_yw, all = TRUE)
+    disagg_w_sa <- disagg_w_sa[order(as.Date(disagg_w_sa$date)),]
+    disagg_w_sa <- disagg_w_sa[complete.cases(disagg_w_sa),]
+    disagg_w_sa <- xts(disagg_w_sa, order.by=as.Date(disagg_w_sa$date))
+    disagg_w_sa <- disagg_w_sa[,-c(1, ncol(disagg_w_sa))]
+    
+    
+    dfmod_sa <- merge(trend, disagg_w_sa)
+    dfmod_sa <- dfmod_sa[first(which(!is.na(dfmod_sa[,2]))):nrow(trend)]
+    
+    names(dfmod_sa) <- names(dfmod_unsmoothed) 
+    
+    ## add specified dummy variables
+    if (!is.null(dummy)) {
+      vars <- ncol(dfmod_sa) - 1
+      for (i in 1:ncol(dummy)) {
+        if (!dummy[2,i]==2) {
+          if (as.Date(dummy[1,i]) <= nth(zoo::index(dfmod_sa), -2)) {
+            length <- ncol(dfmod_sa)
+            dfmod_sa$dummy <- abs(as.numeric(dummy[2,i]) - 1)
+            dfmod_sa$dummy[zoo::index(dfmod_sa)>=as.Date(dummy[1,i])] <- as.numeric(dummy[2,i])
+            dfmod_unsmoothed$dummy <- abs(as.numeric(dummy[2,i]) - 1)
+            dfmod_unsmoothed$dummy[zoo::index(dfmod_unsmoothed)>=as.Date(dummy[1,i])] <- as.numeric(dummy[2,i])   
+            names(dfmod_sa)[length+1] <- colnames(dummy)[i]
+            names(dfmod_unsmoothed)[length+1] <- colnames(dummy)[i]
+          } else {
+            varlabels <- varlabels[-(vars + i)]
+          }
+        } else {
+          if (as.Date(dummy[1,i]) <= nth(zoo::index(dfmod_sa), -2)) {
+            span <- as.numeric(dummy[3,i])
+            length <- ncol(dfmod_sa)
+            dfmod_sa$dummy <- 0
+            dfmod_sa[(zoo::index(dfmod_sa)>=as.Date(dummy[1,i])-months(span))&(zoo::index(dfmod_sa)<=as.Date(dummy[1,i])+months(span)),]$dummy <- 1
+            dfmod_unsmoothed$dummy <- 0
+            dfmod_unsmoothed[(zoo::index(dfmod_unsmoothed)>=as.Date(dummy[1,i])-months(span))&(zoo::index(dfmod_unsmoothed)<=as.Date(dummy[1,i])+months(span)),]$dummy <- 1 
+            names(dfmod_sa)[length+1] <- colnames(dummy)[i]
+            names(dfmod_unsmoothed)[length+1] <- colnames(dummy)[i]
+          } else {
+            varlabels <- varlabels[-(vars + i)]
+          }
+        }
+      }
+    }
+  }
+  # make price structure decomposition
+  if (!is.null(price_str)) {
+    price_decomp <- price_str_decomp(prices = if(weekly) {prices_complete} else{df[1:span,1]}, product = price_str, weekly=weekly)
+  } else {
+    price_decomp = NULL
+  }
+  
+  ## simple linear model (iid residuals assumption)
+  predictors = dfmod_sa[, -1]
+  price      = dfmod_sa[, 1]
+  npred      = ncol(predictors) + 1
+  
+  formula = formula(paste('price', paste(names(predictors), collapse=" + "), sep=" ~ "))
+  testmod = lm(formula, data=dfmod_sa)
+  summary(testmod)
+  
+  # ecterm = as.xts(coredata(residuals(testmod)), order.by = zoo::index(dfmod_sa))
+  # ar1ec = lm(coredata(ecterm) ~ coredata(stats::lag(ecterm,1)) -1)
+  # summary(ar1ec)
+  
+  ## % of price variation that may be treated as one SD of measurement error
+  measerr = 0
+  
+  ## set up SS-model
+  
+  ### n.obs.
+  N = nrow(price)
+  
+  ### state transition matrix
+  dimSS   = npred*2-1
+  
+  Tt      = diag(dimSS)
+  diag(Tt)[1:npred] <- 0
+  diag(Tt[2:npred, (npred+1):dimSS]) <- 1
+  if (ar) {
+    Tt[1,1] <- 0
+  }
+  ### state variance matrix
+  
+  Rt = diag(dimSS)
+  
+  if (!movingmean) {
+    diag(Rt)[(npred+1):dimSS] <- 0
+  } else {
+    # diag(Rt[2:npred, (npred+1):dimSS]) <- 1
+    # diag(Rt)[(npred+1):dimSS] <- 0
+  }
+  
+  
+  Qt = diag(dimSS)
+  diag(Qt) <- NA
+  if (!movingmean) {
+    diag(Qt)[(npred+1):dimSS] <- 0
+  }
+  
+  # Factor loadings for decomposition model
+  M_zero <- matrix(0, nrow=(N-n.ahead), ncol=npred-1)
+  t <- cbind(rep(1, N-n.ahead), coredata(predictors)[1:(N-n.ahead),], M_zero)
+  Zt = array( t(t), c(1,dimSS,N-n.ahead))
+  
+  # Factor loadings for prediction model
+  if (!n.ahead==0) {
+    M_zero_pred <- matrix(0, nrow=n.ahead, ncol=npred-1)
+    t_pred <- cbind(rep(1, n.ahead), coredata(predictors)[(nrow(predictors)-n.ahead+1):nrow(predictors), , drop=FALSE], M_zero_pred)
+    Zt_pred = array( t(t_pred), c(1,dimSS,n.ahead))    
+    ### measurement error matrix for forecast
+    Ht_pred = array(0, c(1,1,n.ahead))
+  }
+  
+  ### measurement error matrix
+  Ht = array(measerr*price, c(1,1,N-n.ahead))
+  
+  ## initial conditions
+  coefinit = coef(testmod)
+  
+  a1 = c(coefinit, coefinit[-1])
+  P1 = diag(0, dimSS)
+  P1[1,1] <- 0.1
+  diag(P1)[2:npred] <- 0.1
+  
+  P1inf = diag(0, nrow = dimSS, ncol = dimSS)
+  
+  if (!is.null(reset)) {
+    diag(P1)[npred+reset[1,]] <- 0.1
+    diag(P1)[1+reset[1,]] <- 0.1
+    a1[npred+reset[1,]] <- reset[2,]
+    a1[1+reset[1,]] <- reset[2,]
+  }
+  
+  ### define the model
+  model = SSModel(coredata(price)[1:(N-n.ahead)] ~ -1 + SSMcustom(Z = Zt, T = Tt, R = Rt, Q = Qt, a1 = a1, P1 = P1,
+                                                                  P1inf = P1inf) 
+                  , H = Ht)
+  
+  ## define model updating function
+  update_model <- function(pars, model) {
+    if (!movingmean) {
+      #mean reversion
+      diag(model["Q"][,,1])[1:npred] = pars[1:npred]^2
+      # diag(model["Q"][,,1])[1:npred] = exp(pars[1:npred])
+      if (ar) {
+        diag(model["T"][,,1])[2:npred] = pars[(npred+1):(dimSS)]^2/(1+pars[(npred+1):(dimSS)]^2)
+        diag(model["T"][,,1][2:npred, (npred+1):dimSS]) = 1 - pars[(npred+1):(dimSS)]^2/(1+pars[(npred+1):(dimSS)]^2)
+      }
+    } else {
+      #moving mean
+      model["Q"] = diag(pars[1:dimSS]^2)
+      # model["Q"] = diag(exp(pars[1:dimSS]))
+      if (ar) {
+        diag(model["T"][,,1])[2:npred] = pars[(dimSS+1):(dimSS+npred-1)]^2/(1+pars[(dimSS+1):(dimSS+npred-1)]^2)
+        diag(model["T"][,,1][2:npred, (npred+1):dimSS]) = 1 - pars[(dimSS+1):(dimSS+npred-1)]^2/(1+pars[(dimSS+1):(dimSS+npred-1)]^2)
+      }
+    }
+    model
+  }
+  
+  ### define model likelihood
+  SSLik_mod = function(x) {-logLik(update_model(pars = x, model = model))}
+  
+  ### run ML-optimization with parinit = initital guesses
+  
+  if (!movingmean) {
+    #mean reversion
+    parinit = c(summary(testmod)$coefficients[, 2])
+    # parinit = log(c(summary(testmod)$coefficients[, 2]))
+    upper = c(summary(testmod)$coefficients[, 2]*2)
+    lower = c(summary(testmod)$coefficients[, 2]/2)
+  } else {
+    #moving mean
+    guesses <- (apply(
+      rbind(apply(abs(diff(predictors[1:15,]))[-1,],2,median),
+            apply(abs(scale(predictors[1:15,], scale = FALSE)),2,median)
+      )
+      , 2, min)/0.06745)^2
+    guesses <- ifelse((guesses==0|is.na(guesses)), 0.0001, guesses)
+    parinit = c(summary(testmod)$coefficients[, 2], guesses)
+    # parinit = log(c(summary(testmod)$coefficients[, 2], guesses))
+    upper = c(summary(testmod)$coefficients[, 2]*2, guesses*2)
+    lower = c(summary(testmod)$coefficients[, 2]/2, guesses/2)
+  }
+  if (ar) {
+    parinit <- c(parinit, rep(sqrt(0.5/(1-0.5)), npred-1))
+    upper <- c(upper, rep(1, npred-1))
+    lower <- c(lower, rep(0, npred-1))
+  }
+  ## obtain model parameters
+  
+  modest = optim(par = parinit, fn = SSLik_mod, method = 'L-BFGS-B',
+                 control = list('trace' = 3, 'maxit' = 15000),
+                 upper = upper,
+                 lower = lower)
+  
+  # modest = optim(par = parinit, fn = SSLik_mod, method = 'L-BFGS-B',
+  #                control = list('trace' = 3, 'maxit' = 15000))
+  parest = modest$par
+  
+  # modest = multiStartoptim(objectivefn = SSLik_mod, lower=lower, upper=upper,
+  #                          method='L-BFGS-B', nbtrials=20, typerunif='sobol',
+  #                          localsearch = 'median',
+  #                          control = list(trace = 0, 'maxit' = 2000), verb=TRUE)
+  # parest = modest$res$par
+  
+  ### update model and run smoother
+  modelest  = update_model(pars = as.numeric(parest), model = model)
+  smoothest = KFS(modelest)
+  
+  ### extract estimated time-varying coefficients
+  alphahat   = as.xts(coredata(smoothest$alphahat), order.by = zoo::index(dfmod_sa)[1:(N-n.ahead)])
+  alphahatsd = as.xts(t(apply(smoothest$V, 3, function(x) {sqrt(diag(x))})), order.by = zoo::index(dfmod_sa)[1:(N-n.ahead)])
+  ### record state names
+  statenames = c('demand', names(dfmod_sa)[-1])
+  
+  alphahat <- alphahat[,1:npred]
+  alphahatsd <- alphahatsd[,1:npred]
+  
+  if (!n.ahead==0) {
+    newdata = SSModel(rep(NA, n.ahead) ~ -1 + SSMcustom(Z = Zt_pred, T = modelest$T, R = modelest$R, Q = modelest$Q, a1 = modelest$a1, P1 = modelest$P1,
+                                                        P1inf = modelest$P1inf) 
+                      , H = Ht_pred)
+    
+    periods <- zoo::index(tail(dfmod_sa, n.ahead))
+    if (weekly) {
+      avg_seas <- data.frame(value = seasonal, date = zoo::index(seasonal)) %>% group_by(week(date)) %>% summarise(mean = mean(value))
+      avg_seas <- rbind(avg_seas, c(53, 0))
+      forecast_seas <- c(avg_seas[week(periods), 2, drop=TRUE])
+    } else {
+      avg_seas <- data.frame(value = seasonal, date = zoo::index(seasonal)) %>% group_by(month(date)) %>% summarise(mean = mean(value))
+      forecast_seas <- c(avg_seas[month(periods), 2, drop=TRUE])
+    }
+    
+    if (fcast_type=='ss') {
+      
+      scope <- ifelse(weekly, min(nrow(alphahat), 52), min(nrow(alphahat), 12))
+      elast <- as.vector(colMeans(tail(alphahat, scope)))
+      elast_sd <- as.vector(colMeans(tail(alphahatsd, scope)))
+      
+      fcast <- xts(tail(dfmod_sa[,-1], n.ahead) %*% elast[-1] + forecast_seas, order.by=as.Date(periods))
+      lwr <- xts(tail(dfmod_sa[,-1], n.ahead) %*% (elast[-1]-1.96*elast_sd[-1]) + forecast_seas, order.by=as.Date(periods))
+      upr <- xts(tail(dfmod_sa[,-1], n.ahead) %*% (elast[-1]+1.96*elast_sd[-1]) + forecast_seas, order.by=as.Date(periods))
+      
+      # decomp_fcast <- matrix(t(elast[-1]), ncol=length(elast[-1]), nrow=n.ahead, byrow=TRUE) * tail(dfmod_sa[,-1], n.ahead)
+      # decomp_fcast <- merge(fcast, 'demand', decomp_fcast, forecast_seas, 'noise')
+      # names(decomp_fcast) <- c('value', 'demand', names(dfmod_sa[,-1]), 'seasonal', 'noise')
+      # decomp_fcast[,c(2, ncol(decomp_fcast))] <- 0
+      decomp_fcast <- NULL
+    } 
+    if (fcast_type=='ss_native') {
+      forecast_sa <- predict(modelest, newdata, interval="confidence", level=conf.level, se.fit=TRUE)
+      fcast <- xts(forecast_sa[,1] + forecast_seas, order.by=as.Date(periods))
+      lwr <- xts(forecast_sa[,2] + forecast_seas, order.by=as.Date(periods))
+      upr <- xts(forecast_sa[,3] + forecast_seas, order.by=as.Date(periods))
+      decomp_fcast <- NULL
+    }
+    if (fcast_type=='var') {
+      library(vars)
+      varmodel <- vars::VAR(head(dfmod_sa, -n.ahead), type='both', lag.max = 5, ic = 'AIC')
+      fcast <- predict(varmodel, n.ahead=n.ahead)
+      forecast_sa <- fcast$fcst[[1]]
+      fcast <- xts(forecast_sa[,1] + forecast_seas, order.by=as.Date(periods))
+      lwr <- xts(forecast_sa[,2] + forecast_seas, order.by=as.Date(periods))
+      upr <- xts(forecast_sa[,3] + forecast_seas, order.by=as.Date(periods))
+      ts.plot(ts(fcast), ts(lwr), ts(upr))
+      decomp_fcast <- NULL
+    }
+    if (fcast_type=='bvar') {
+      library(bvarr)
+      setup <- bvar_conj_setup(head(dfmod_sa, -n.ahead), constant = TRUE, p = 5)
+      bvar_model <- bvar_conj_estimate(setup)
+      forecast_sa <- bvar_conj_forecast(bvar_model, h = n.ahead, type = "prediction")
+      fcast <- xts(forecast_sa[forecast_sa$variable==names(dfmod_sa)[1] & forecast_sa$what=='mean', 'value'] + forecast_seas, order.by=as.Date(periods))
+      lwr <- xts(forecast_sa[forecast_sa$variable==names(dfmod_sa)[1] & forecast_sa$what=='lower_95', 'value'] + forecast_seas, order.by=as.Date(periods))
+      upr <- xts(forecast_sa[forecast_sa$variable==names(dfmod_sa)[1] & forecast_sa$what=='upper_95', 'value'] + forecast_seas, order.by=as.Date(periods))
+      ts.plot(ts(fcast), ts(lwr), ts(upr))
+      decomp_fcast <- NULL
+    }
+    
+      
+    forecast <- as.xts(merge(fcast, lwr, upr))
+    length <- length(complete.cases(dfmod_unsmoothed[,1])) - n.ahead
+    forecast <- rbind(cbind(value=head(dfmod_unsmoothed[,1], -n.ahead), lower=rep(NA, length), upper=rep(NA, length)), forecast)
+    forecast[1:(length),2:3] <- forecast[1:(length),1]
+    forecast2 <- rollsum(forecast, ifelse(weekly, 52, 12), align='right', fill = NA, na.rm = TRUE)
+    forecast2 <- forecast2[complete.cases(forecast2),]
+    forecast2 <- tail(forecast2, n.ahead+1)
+    forecast <- tail(forecast, n.ahead+1)        
+    names(forecast) <- c('value', 'lower', 'upper')
+    names(forecast2) <- c('value', 'lower', 'upper')
+  } else {
+    forecast <- NULL
+    forecast2 <- NULL 
+    decomp_fcast <- NULL
+  }
+  
+  
+  ### make decomposition tab
+  decomp = cbind(dfmod_unsmoothed[,1], alphahat[,1], alphahat[,-1]*dfmod_sa[, -1], seasonal, noise)
+  decomp <- decomp[complete.cases(decomp),]
+  names(decomp) = c('value', 'demand', names(dfmod_sa)[-1], 'seasonal', 'noise')
+  decomp <- rbind(decomp, decomp_fcast)
+  
+  if (!weekly) {
+    decomp2 <- rollsum(decomp, 12, align='right', fill = NA, na.rm=TRUE)
+  } else {
+    decomp2 <- rollsum(decomp, 52, align='right', fill = NA, na.rm=TRUE)
+  }
+  decomp2 <- decomp2[complete.cases(decomp2),]
+  decomp2 <- decomp2[,-which(names(decomp2)=='seasonal')]
+  if (!n.ahead==0) {
+    impact_factor <- t(as.matrix(colSums(head(decomp[,-c(1, which(names(decomp)=='seasonal'))], -n.ahead))))
+  } else {
+    impact_factor <- t(as.matrix(colSums(decomp[,-c(1, which(names(decomp)=='seasonal'))])))
+  }
+  idx <- which(as.Date(zoo::index(df_list[[1]]))==first(zoo::index(decomp))) - 1
+  cum_impact <- c(as.numeric(df_list[[1]][idx]) * (impact_factor))
+  names(cum_impact) <- c('Инфляция спроса', varlabels, 'Прочие факторы')
+  shares <- abs(cum_impact) / sum(abs(cum_impact)) * 100
+  shares2 <- cum_impact / sum(cum_impact) * 100
+  price_change <- as.numeric(last(df_list[[1]][!is.na(df_list[[1]])])) - as.numeric(df_list[[1]][idx])
+  cum_impact <- shares2 * price_change / 100
+  
+  names(shares) <- c('Инфляция спроса', varlabels, 'Прочие факторы')
+  
+  ret_list <- list(model_name = model_name, df = df_list, testmod = testmod, dfmod_sa = dfmod_sa, dfmod_unsmoothed = dfmod_unsmoothed,
+                   modelest = modelest, smoothest = smoothest, parest = parest,
+                   alphahat = alphahat, alphahatsd = alphahatsd, statenames = statenames, decomp = decomp, decomp2=decomp2, shares=shares, shares2=shares2, cump_impact = cum_impact, 
+                   varlabels=varlabels, price_decomp = price_decomp, weight=weight, weekly=weekly, n.ahead = n.ahead, forecast = forecast, forecast2 = forecast2)
+  if (!nosave) {
+    saveit(ret_list, where = './data_output/models/', string = model_name)
+  }
+  if (!out_of_sample) {
+    plotelast(ret_list)
+  }
+  return(ret_list)
+  
+}
+# fcast_eval() simulate out-of-sample prediction and save results --------------
+fcast_eval <- function(df, train=24, n.ahead=1, pars) {
+  true_vals <- df[[1]]
+  true_vals = do.call(merge, lapply(true_vals, function(x) {log(x/stats::lag(x))}))[-1,]
+  N <- length(true_vals)
+  stats <- data.frame(matrix(nrow = N-train+1, ncol = 6))
+  out_of_sample <- TRUE
+  pars <- append(pars, out_of_sample)
+  for (i in train:(N)) {
+    if (!pars[['weekly']]) {
+      df_trim <- (Reduce(function(df1, df2) merge(df1, df2), df))[1:i]
+      df_trim <- as.list(df_trim)
+    } else {
+      df_trim <- df
+      df_trim[[1]] <- df_trim[[1]][1:i]
+      trim_to <- as.Date(last(zoo::index(df_trim[[1]])))
+      for (k in 2:length(df_trim)) {
+        df_trim[[k]] <- df_trim[[k]][as.Date(zoo::index(df_trim[[k]]))<=trim_to]
+      } 
+    }
+    pars[['n.ahead']] <- 1
+    pars[['nosave']] <- TRUE
+    model <- model_estimation(df_trim, pars)
+    fcast_value <- as.numeric(model$forecast[2,1])
+    true_value <- as.numeric(true_vals[i])
+    error <- true_value - fcast_value
+    error_sq <- error^2
+    abs_err <- abs(error)
+    stats[i-train+1,] <- c(NA, true_value, fcast_value, error, error_sq, abs_err)
+    print(paste(zoo::index(true_vals)[i], colnames(true_vals)))
+  }
+  names(stats) <- c('date', 'true_value', 'fcast_value', 'error', 'error_sq', 'abs_err')
+  rownames(stats) <- as.Date(zoo::index(true_vals)[(train):N])
+  stats <- xts(stats, order.by=as.Date(rownames(stats)))
+  rmse <- sqrt(sum(stats$error_sq)/nrow(stats))*100
+  mae <- sum(stats$abs_err)/nrow(stats)*100
+  mape <- sum(abs(stats$error/stats$true_value))/nrow(stats)*100
+  stats$date <- format(as.Date(zoo::index(stats)), format='%Y-%m-%d')
+  metrics <- data.frame(cbind('RMSE' = rmse, 'MAE' = mae, 'MAPE' = mape))
+  
+  list <- list(metrics = metrics, report = data.frame(stats))
+  write_xlsx(list, paste('./data_output/forecast/', colnames(df[[1]]), '.xlsx', sep=''))
+  
+  stats <- data.frame(stats)
+  stats[,-1] <- apply(stats[,-1], 2, as.numeric)
+  stats[,1] <- as.Date(stats[,1])
+  ggplot(stats) + geom_line(aes(x=date, y=true_value)) + geom_line(aes(x=date, y=fcast_value), col='blue') +
+    scale_x_date(breaks='6 months', labels = scales::label_date("%b-%y"), expand=expansion(add = 10))
+  ggsave(paste('./fig/forecast/', colnames(df[[1]]), '_timegraph.png', sep=''))
+  ggplot(stats) + geom_point(aes(x=true_value, y=fcast_value)) + coord_fixed() + 
+    geom_abline(intercept = 0, slope = 1, col="gray")
+  ggsave(paste('./fig/forecast/', colnames(df[[1]]), '_correspondence.png', sep=''))
+
+  return(list)
+}
+# price_str_decomp() decomposes prices changes into price structure elements ----------------------
+price_str_decomp <- function(prices, product, weekly=FALSE) {
+  cost_structure <- read_xlsx('./data_inputs/long/price_structure_long.xlsx')
+  data <- cost_structure[cost_structure$product==product,]
+  full <- as.xts(matrix(nrow=length(prices), ncol=length(unique(data$variable))), order.by=as.Date(zoo::index(prices)))
+  count <- 1
+  for (i in unique(data$variable)) {
+    df <- data[data$variable==i,c(3,4)]
+    df$value <- as.numeric(df$value)
+    df$date <- ymd(as.numeric(df$date), truncated = 2L)
+    df <- as.xts(df[,1], order.by=df$date)
+    if (!weekly) {
+      int <- lubridate::interval(as.Date('2015-01-01'), last(as.Date(zoo::index(prices)))) %/% months(1) + 1
+      foo <- seq(from=1, by=1, length.out=int)
+      timeindex <- seq(ymd('2015-01-01'),
+                       as.Date(last(zoo::index(prices))),
+                       by = '1 month')
+      ref <- xts(foo, order.by = timeindex)
+      df <- merge(df, ref)[1:length(foo)]
+      df[,1] <- na_interpolation(df[, 1], option = "linear")
+      df <- df[,1]
+      names(df) <- i
+      zoo::index(df) <- as.yearmon(zoo::index(df))
+      full[,count] <- df
+      count <- count + 1
+    } else {
+      ref <- data.frame(date=ceiling_date(seq(from=as.Date(paste(year(prices)[1], '01', '01', sep='-')), 
+                                              to=last(zoo::index(prices)), by='week'), unit='weeks', week_start=1))
+      
+      foo <- seq(from=1, by=1, length.out=nrow(ref))
+      ref <- xts(foo, order.by = ref$date)
+      df <- merge(df, ref)
+      df[,1] <- na_interpolation(df[, 1], option = "linear")
+      df <- df[,1]
+      names(df) <- i
+      df <- df[which(zoo::index(df) %in% zoo::index(prices))]
+      full[,count] <- df
+      count <- count + 1
+    }
+  }
+  names <- c('Стоимость сырья', 'Расходы на производство', 'Прибыль/убыток', 'НДС, акциз, иные налоги', 'Плата за доставку, осуществляемую переработчиком', 'Оборот посреднического звена', 'Торговая наценка', 'НДС, начисленный в рознице')
+  names(full) <- names
+  full <- full[1:length(prices),]/100
+  
+  q = seq_along(zoo::index(full))
+  full_smooth = do.call(merge, lapply(full, function(x) {
+    as.xts(loess(x~q, degree=2, span=0.4)$fitted,
+           order.by = zoo::index(full))
+  }))
+  names(full_smooth) <- names
+  decomp <- diag(as.vector(prices)) %*% full_smooth
+  decomp <- as.xts(decomp, order.by=zoo::index(prices))
+  return(decomp)
+}
+# save_price_decomp() save price structure decomposition as a widget -----------
+save_price_decomp <- function(estimated, filename) {
+  decomp <- estimated$price_decomp
+  names <- names(estimated$price_decomp)
+  p <- plot_price_decomp(estimated)
+  fname <- paste(filename, '.html', sep='')
+  options(encoding = "Windows-1251")
+  htmlwidgets::saveWidget(p, file = fname, selfcontained=TRUE)
+  options(encoding = "UTF-8")
+  file.rename(from = fname,
+              to   = paste('./data_output/price_structure/', fname))
+  decomp <- data.frame(decomp)
+  decomp$price <- rowSums(decomp)
+  decomp$date <- rownames(decomp)
+  decomp <- decomp[,c(length(decomp), length(decomp)-1, 1:(length(decomp)-2))]
+  names(decomp) <- c('Дата', 'Розничная цена', names)
+  fname <- paste('./data_output/price_structure/', filename, '.xlsx', sep='')
+  write_xlsx(as.data.frame(decomp), fname)
+}
+
+#---------------------------------------------------------------------------------------------------
+# MARKET SUPPLY ANALISYS-RELATED FUNCTIONS
+#---------------------------------------------------------------------------------------------------
+
+source('../../fedstat-parser/loadR.R')
+
+#' Get FNS unit codes
+#'
+#' @return Returns a dataframe with all possible unit codes and their corresponding names
+#' @export
+get_edizm <- function() {
+  df <- read.dbf('D:/YandexDisk/Russia/!FTS/metadata/EDIZM.dbf')
+  df <- apply(df,2, function(x) {iconv(x,from = '866', to = 'UTF-8')})
+  df <- as.data.frame(df, stringsAsFactors = FALSE)
+  return(df)
+}
+
+#' Get FNS country codes
+#'
+#' @return Returns a dataframe with all possible country codes and their corresponding names
+#' @export
+get_country <- function() {
+  df <- read.dbf('D:/YandexDisk/Russia/!FTS/metadata/CTPAHA.dbf')
+  df <- apply(df,2, function(x) {iconv(x,from = '866', to = 'UTF-8')})
+  df <- as.data.frame(df, stringsAsFactors = FALSE)
+  return(df)
+}
+
+#' Get data to calculate total supply
+#'
+#' @param units A logical which, if TRUE, forces the function to return unit from all datasets in text format
+#' @param categ A character vector corresponding to the name of the category in the keys.xlsx file
+#' @param convert A character vector of length 4 specifying conversion factors for production, export, import and stocks statistics respectively
+#' @param save A logical specifying whether raw filtered data should be saved in .xlsx format
+#' @param trade_type A character vector specifying which column to use from FTS data. Takes values 'NETTO' and 'KOL'
+#' @param exclude_partners A list of 2 elements named 'ex' and 'im'. Each of the elements is a vector which specifies country codes that have to be excluded from the calculations
+#'
+#' @return If units = FALSE, Returns a list of length 8 with (1)-(4) production, export, import and stocks data, (5)-(7) a vector of HS, OKPD and OKPD2 codes, (8) the name of the category as specified in keys.xlsx. Otherwise, returns all units for requested data.
+#' @export
+supply_data <- function(categ, units = FALSE, missing_interp = FALSE, convert = NULL, save=FALSE, trade_type='NETTO', exclude_partners=list(ex = NULL, im = NULL), clean_rubprod = TRUE, taxcat = NULL, filterEI = NULL, prodPriceGroups = NULL) {
+  # extract metadata
+  sub <- keys[keys$name==categ,]
+  okpd_keys <- unique(sub$OKPD[!is.na(sub$OKPD)])
+  okpd2_keys <- unique(sub$OKPD2[!is.na(sub$OKPD2)])
+  okpd_keys_pp <- unique(sub$OKPD_prodprice[!is.na(sub$OKPD_prodprice)])
+  okpd2_keys_pp <- unique(sub$OKPD2_prodprice[!is.na(sub$OKPD2_prodprice)])
+  
+  tn_keys <- as.character(unique(sub$TNVED[!is.na(sub$TNVED)]))
+  okpd_names <- unique(sub$OKPD_name[!is.na(sub$OKPD_name)])
+  okpd2_names <- unique(sub$OKPD2_name[!is.na(sub$OKPD2_name)])
+  okpd_names_pp <- unique(sub$OKPD_name_prodprice[!is.na(sub$OKPD_name_prodprice)])
+  okpd2_names_pp <- unique(sub$OKPD2_name_prodprice[!is.na(sub$OKPD2_name_prodprice)])
+  
+  tn_names <- unique(sub$TNVED_name[!is.na(sub$TNVED_name)]) 
+  okpd_retail_keys <- as.character(unique(sub$OKPD_retail[!is.na(sub$OKPD_retail)]))
+  okpd2_retail_keys <- as.character(unique(sub$OKPD2_retail[!is.na(sub$OKPD2_retail)]))
+  okpd_retail_names <- unique(sub$OKPD_retail_name[!is.na(sub$OKPD_retail_name)])
+  okpd2_retail_names <- unique(sub$OKPD2_retail_name[!is.na(sub$OKPD2_retail_name)])
+  margin_whole_name <- unique(sub$margin_whole[!is.na(sub$margin_whole)])
+  margin_retail_name <- unique(sub$margin_ret[!is.na(sub$margin_ret)])
+  kipc <- unique(sub$KIPC[!is.na(sub$KIPC)]) 
+  okved <- unique(sub$OKVED[!is.na(sub$OKVED)]) 
+  taxname <- unique(sub$TAX[!is.na(sub$TAX)]) 
+  
+  # filter datasets
+  margin <- margin %>%
+    filter(name %in% c(margin_retail_name, margin_whole_name)) %>%
+    mutate(value = as.numeric(value))
+  
+  prod_sub_2010 <- prod_2010 %>%
+    filter(OKPD_id %in% okpd_keys & OKATO_id == "643") %>%
+    group_by(date)
+  prod_sub_2017 <- prod_2017 %>%
+    filter(OKPD_id %in% okpd2_keys & OKATO_id == "643") %>%
+    group_by(date)
+  if (!is.null(filterEI)) {
+    prod_sub_2010 <- prod_sub_2010 %>%
+      filter(OKEI == filterEI)
+    prod_sub_2017 <- prod_sub_2017 %>%
+      filter(OKEI == filterEI)
+  }
+
+  production <- rbind(prod_sub_2010, prod_sub_2017) %>% ungroup()
+  production <- production %>% group_by(OKPD_id, OKPD, OKEI_id, OKEI, OKATO_id, OKATO, EI) %>% pad_by_time(date) %>% arrange(date)
+  
+  # production <- production %>% 
+  #   mutate(OKATO_id = ifelse(OKATO_id=='035', '041', OKATO_id)) %>%
+  #   mutate(OKATO_id = ifelse(OKATO_id=='036', '042', OKATO_id)) %>%
+  #   mutate(OKATO_id = ifelse(OKATO_id=='039', '040', OKATO_id))
+  # consumer prices
+  if (!length(kipc) == 0) {
+    cons_price <- c_price %>%
+      filter(KIPC %in% kipc) %>%
+      group_by(date = yearquarter(date), OKATO_id, KIPC) %>%
+      summarise(value = mean(value, na.rm=TRUE), OKATO = unique(OKATO), OKATO_id = unique(OKATO_id)) %>%
+      mutate(date = as.Date(date)) %>%
+      group_by(OKATO_id) %>%
+      pad_by_time(.by="quarter") %>%
+      mutate(OKATO_id = ifelse(OKATO_id=='035', '041', OKATO_id)) %>%
+      mutate(OKATO_id = ifelse(OKATO_id=='036', '042', OKATO_id)) %>%
+      mutate(OKATO_id = ifelse(OKATO_id=='037'|OKATO_id=='032', '040', OKATO_id))
+    cons_price %>%
+      ggplot() +
+      geom_line(aes(x=date, y=value, col=OKATO, group=OKATO)) +
+      facet_wrap(~KIPC, scales = 'free_y') +
+      theme(legend.position="none")
+  } else {
+    cons_price <- NULL
+  }
+  # producer prices
+  price_sub_2010 <- price_2010 %>%
+    filter(OKPD_id %in% okpd_keys_pp & OKATO_id == "643" & type == "Всего") %>%
+    group_by(date)
+  price_sub_2017 <- price_2017 %>%
+    filter(OKPD_id %in% okpd2_keys_pp & OKATO_id == "643" & type == "Всего") %>%
+    group_by(date)
+  # go to a higher level if no data available
+  # if (nrow(price_sub_2010)==0) {
+  #   price_sub_2010 <- price_2010 %>%
+  #     filter(OKPD_id %in% substr(okpd_keys, 1, nchar(okpd_keys)-4) & OKATO_id == "643" & type == "Всего") %>%
+  #     group_by(date)  
+  #   }
+  # if (nrow(price_sub_2017)==0) {
+  #   price_sub_2017 <- price_2017 %>%
+  #     filter(OKPD_id %in% substr(okpd2_keys, 1, nchar(okpd_keys)-4) & OKATO_id == "643" & type == "Всего") %>%
+  #     group_by(date)  
+  # }
+  prod_price_names <- list("2010" = unique(price_sub_2010$OKPD), "2017" = unique(price_sub_2017$OKPD))
+  price <- rbind(price_sub_2010, price_sub_2017) %>% ungroup()
+  price <- price %>% group_by(OKPD_id, OKPD, OKEI_id, OKEI, OKATO_id, OKATO, EI) %>% pad_by_time(date) %>% arrange(date)
+  
+  price$group <- NA
+  for (i in 1:length(prodPriceGroups)) {
+    x <- prodPriceGroups[[i]]
+    price[price$OKPD_id %in% x,]$group <- i
+  }
+  
+  stocks_sub_2010 <- stocks_2010 %>%
+    filter(OKPD_id %in% okpd_keys & OKATO_id == "643") %>%
+    group_by(date)
+  stocks_sub_2017 <- stocks_2017 %>%
+    filter(OKPD_id %in% okpd2_keys & OKATO_id == "643") %>%
+    group_by(date)
+  if (!is.null(filterEI)) {
+    stocks_sub_2010 <- stocks_sub_2010 %>%
+      filter(OKEI == filterEI)
+    stocks_sub_2017 <- stocks_sub_2017 %>%
+      filter(OKEI == filterEI)
+  }
+  trade_sub <- fts %>%
+    filter(TNVED %in% tn_keys)
+  trade_sub <- trade_sub %>%
+    left_join(edizm)
+  trade_sub[is.na(trade_sub$NAME),]$NAME <- trade_sub[is.na(trade_sub$NAME),]$EDIZM   
+  l <- as.numeric(which(names(trade_sub) == 'EDIZM'))
+  trade_sub <- data.frame(trade_sub)[,-l]
+  names(trade_sub)[ncol(trade_sub)] <- 'EDIZM'
+  trade_sub$date <- as.Date(yearmonth(trade_sub$PERIOD))
+  retail_sub_2010 <- retail_2010 %>%
+    filter(OKPD_id %in% okpd_retail_keys & OKATO_id == "643") %>%
+    group_by(date)
+  
+  retail_sub_2017 <- retail_2017 %>%
+    filter(OKPD_id %in% okpd2_retail_keys & OKATO_id == "643") %>%
+    group_by(date)
+  
+  retail <- rbind(retail_sub_2010, retail_sub_2017) %>% ungroup()
+  retail_names <- list("2010" = okpd_retail_names, "2017" = okpd2_retail_names)
+  
+  if (!nrow(retail)==0) {
+    retail <- retail %>% group_by(OKPD_id, OKPD, OKATO_id, OKATO, EI) %>% pad_by_time(date) %>% arrange(date)
+  } else {
+    retail <- NULL
+  }
+  if (units) {
+    units_vec <- c('prod_2010' = unique(prod_sub_2010$OKEI), 'prod_2017' = unique(prod_sub_2017$OKEI), 'trade' = unique(trade_sub$EDIZM), 'stock_2010' = unique(stocks_sub_2010$OKEI), 
+                   'stock_2017' = unique(stocks_sub_2017$OKEI))
+    return(units_vec)
+  }
+
+  
+  import_sub <- trade_sub %>%
+    filter(NAPR == 'ИМ') %>%
+    group_by(date)
+  export_sub <- trade_sub %>%
+    filter(NAPR == 'ЭК') %>%
+    group_by(date)
+  # extract production & sales data by federal districts 
+  prod_sub_2010_FD <- prod_2010 %>%
+    filter(OKPD_id %in% okpd_keys & !OKATO_id == "643") %>%
+    group_by(date)
+  prod_sub_2017_FD <- prod_2017 %>%
+    filter(OKPD_id %in% okpd2_keys & !OKATO_id == "643") %>%
+    group_by(date)
+  if (!is.null(filterEI)) {
+    prod_sub_2010_FD <- prod_sub_2010_FD %>%
+      filter(OKEI == filterEI)
+    prod_sub_2017_FD <- prod_sub_2017_FD %>%
+      filter(OKEI == filterEI)
+  }
+  production_FD <- rbind(prod_sub_2010_FD, prod_sub_2017_FD)
+  production_FD <- production_FD %>% mutate(OKATO = ifelse(OKATO=='Южный федеральный округ (с 2010 года)'|OKATO=='Южный федеральный округ (с 29.07.2016)'|OKATO=='Южный федеральный округ (по 2009 год)',
+                                                           'Южный федеральный округ', OKATO))
+  production_FD <- production_FD %>% 
+    mutate(OKATO_id = ifelse(OKATO_id=='035', '041', OKATO_id)) %>%
+    mutate(OKATO_id = ifelse(OKATO_id=='036', '042', OKATO_id)) %>%
+    mutate(OKATO_id = ifelse(OKATO_id=='037'|OKATO_id=='032', '040', OKATO_id))
+  production_FD <- production_FD %>% group_by(OKPD_id, OKPD, OKEI_id, OKEI, OKATO_id, OKATO, EI) %>% pad_by_time(date)
+  retail_sub_2010_FD <- retail_2010 %>%
+    filter(OKPD_id %in% okpd_retail_keys & str_detect(OKATO, regex('федеральный', ignore_case = TRUE))) %>%
+    mutate(value = case_when(
+      OKATO != 'Южный федеральный округ (с 29.07.2016)' ~ value,
+    )) %>%
+    group_by(date)
+  
+  retail_sub_2017_FD <- retail_2017 %>%
+    filter(OKPD_id %in% okpd2_retail_keys & str_detect(OKATO, regex('федеральный', ignore_case = TRUE))) %>%
+    group_by(date)
+  retail_FD <- rbind(retail_sub_2010_FD, retail_sub_2017_FD)
+  retail_FD <- retail_FD %>% mutate(OKATO = ifelse(OKATO=='Южный федеральный округ (с 2010 года)'|OKATO=='Южный федеральный округ (с 29.07.2016)'|OKATO=='Южный федеральный округ (по 2009 год)',
+                                                           'Южный федеральный округ', OKATO))
+  if (nrow(retail_FD)>0){
+    retail_FD <- retail_FD %>% 
+      mutate(OKATO_id = ifelse(OKATO_id=='035', '041', OKATO_id)) %>%
+      mutate(OKATO_id = ifelse(OKATO_id=='036', '042', OKATO_id)) %>%
+      mutate(OKATO_id = ifelse(OKATO_id=='037'|OKATO_id=='032', '040', OKATO_id)) %>%
+      group_by(OKPD_id, OKPD, OKATO_id, OKATO, EI) %>%
+      pad_by_time()
+  } else {
+    retail_FD <- NULL
+  }
+  # extract production & sales data by regions
+  prod_reg_sub_2010 <- prod_reg_2010 %>%
+    filter(OKPD_id %in% okpd_keys) %>%
+    group_by(date) %>% select(-OKATO) %>% rename("OKATO" = "OKATO_new") %>% mutate(OKEI = NA, OKEI_id=NA) %>% relocate(OKEI, OKEI_id, OKATO, OKATO_id, OKPD, OKPD_id, value, date)
+  prod_reg_sub_2010 <- prod_reg_sub_2010 %>% 
+    mutate(OKATO_id = ifelse(OKATO_id=='035', '041', OKATO_id)) %>%
+    mutate(OKATO_id = ifelse(OKATO_id=='036', '042', OKATO_id))  %>%
+    mutate(OKATO_id = ifelse(OKATO_id=='037', '040', OKATO_id))
+  prod_reg_sub_2017 <- prod_reg_2017 %>%
+    filter(OKPD_id %in% okpd2_keys) %>%
+    group_by(date)  %>% relocate(OKEI, OKEI_id, OKATO, OKATO_id, OKPD, OKPD_id, value, date)
+  prod_reg_sub_2017 <- prod_reg_sub_2017 %>% 
+    mutate(OKATO_id = ifelse(OKATO_id=='035', '041', OKATO_id)) %>%
+    mutate(OKATO_id = ifelse(OKATO_id=='036', '042', OKATO_id)) %>%
+    mutate(OKATO_id = ifelse(OKATO_id=='037', '040', OKATO_id))
+  if (!is.null(filterEI)) {
+    prod_reg_sub_2017 <- prod_reg_sub_2017 %>%
+      filter(OKEI == filterEI)
+  }
+  ## try to find missing values in Sofist data
+  production <- production %>% left_join(prod_reg_sub_2010, by=c("OKPD_id", "date", "OKATO_id")) %>% 
+    select(-OKEI.y, -OKEI_id.y, -OKATO.y, -OKPD.y) %>%
+    mutate(value=coalesce(value.x, value.y)) %>% 
+    select(-value.x, -value.y) %>%
+    rename_with(~str_replace_all(., '.x', '')) 
+  production <- production %>%
+    left_join(prod_reg_sub_2017, by=c('OKATO_id', 'OKATO', 'OKEI_id', 'OKEI', 'OKPD_id', 'date')) %>%
+    mutate(value = coalesce(value.x, value.y)) %>% select(-OKPD.y, -value.x, -value.y) %>% rename("OKPD" = "OKPD.x")
+  
+  production_FD <- production_FD %>%
+    left_join(prod_reg_sub_2010, by=c('OKATO_id', 'date', 'OKPD_id')) %>%
+    select(-OKEI.y, -OKEI_id.y, -OKATO.y, -OKPD.y) %>%
+    mutate(value=coalesce(value.x, value.y)) %>%
+    select(-value.x, -value.y) %>%
+    rename_with(~str_replace_all(., '.x', ''))
+  production_FD <- production_FD %>%
+    left_join(prod_reg_sub_2017, by=c('OKATO_id', 'OKATO', 'OKEI_id', 'OKEI', 'OKPD_id', 'date')) %>%
+    select(-OKPD.y) %>%
+    mutate(value = coalesce(value.x, value.y)) %>% select(-value.x, -value.y) %>% rename("OKPD" = "OKPD.x")
+  ##
+  fedDistr <- c("030", "031", "040", "038", "033", "034", "035", "036", "039", "643", "042", "041")
+  prod_reg_sub_2010 <- prod_reg_sub_2010 %>% filter(!OKATO_id %in% fedDistr)
+  prod_reg_sub_2017 <- prod_reg_sub_2017 %>% filter(!OKATO_id %in% fedDistr)
+  retail_sub_2010_reg <- retail_2010 %>%
+    filter(OKPD_id %in% okpd_retail_keys & !str_detect(OKATO, regex('федеральный', ignore_case = TRUE)) & !OKATO_id=='643') %>%
+    group_by(date)
+  retail_sub_2017_reg <- retail_2017 %>%
+    filter(OKPD_id %in% okpd2_retail_keys & !str_detect(OKATO, regex('федеральный', ignore_case = TRUE)) & !OKATO_id=='643') %>%
+    group_by(date)
+  retail_reg <- rbind(retail_sub_2010_reg, retail_sub_2017_reg)
+  if(!nrow(retail_reg)==0) {
+    retail_reg <- retail_reg %>% group_by(OKPD_id, OKPD, OKATO_id, OKATO, EI) %>% pad_by_time(date)
+  } else {
+    retail_reg <- NULL
+  }
+  #
+  if (!length(taxname)==0) {
+    # coalesce_join <- function(x, y, 
+    #                           by = NULL, suffix = c(".x", ".y"), 
+    #                           join = dplyr::full_join, ...) {
+    #   joined <- join(x, y, by = by, suffix = suffix, ...)
+    #   # names of desired output
+    #   cols <- union(names(x), names(y))
+    #   
+    #   to_coalesce <- names(joined)[!names(joined) %in% cols]
+    #   suffix_used <- suffix[ifelse(endsWith(to_coalesce, suffix[1]), 1, 2)]
+    #   # remove suffixes and deduplicate
+    #   to_coalesce <- unique(substr(
+    #     to_coalesce, 
+    #     1, 
+    #     nchar(to_coalesce) - nchar(suffix_used)
+    #   ))
+    #   
+    #   coalesced <- purrr::map_dfc(to_coalesce, ~dplyr::coalesce(
+    #     joined[[paste0(.x, suffix[1])]], 
+    #     joined[[paste0(.x, suffix[2])]]
+    #   ))
+    #   names(coalesced) <- to_coalesce
+    #   
+    #   dplyr::bind_cols(joined, coalesced)[cols]
+    # }
+    
+    taxStruct <- tax_all %>%
+      mutate(value = as.numeric(value)) %>%
+      filter(OKVED %in% taxname) %>%
+      filter(type %in% c(taxcat, 'Поступило - всего')) %>% 
+      mutate(total = case_when(type == "Поступило - всего" ~ value)) %>% 
+      group_by(date) %>%
+      fill(total) %>%
+      mutate(structure = value/total)
+    
+    add <- taxStruct %>% 
+      filter(!type == 'Поступило - всего') %>%
+      group_by(date) %>%
+      summarize(structure = 1 - sum(structure), type = 'Прочее')
+    
+    taxStruct <- rbind(taxStruct, add) %>%
+      group_by(type) %>%
+      summarize(structure = mean(structure, na.rm=TRUE))
+    
+    tax <- tax_all %>%
+      mutate(value = as.numeric(value)) %>%
+      filter(OKVED %in% taxname) %>%
+      filter(type == "Поступило - всего") %>%
+      filter(as.Date(date)>=as.Date('2014-01-01')) %>%
+      group_by(date=as.Date(yearquarter(date)), OKVED, type) %>%
+      summarize(value = sum(value, na.rm=TRUE)) %>%
+      mutate(value=ifelse(value==0, NA, value))
+    
+    tax$value <- na_seasplit(tax$value, find_frequency = TRUE)
+    s <- seas(ts(tax$value, freq=4, start=c(2014,1)), regression.aictest=NULL)
+    plot(s)
+    tax$value_sa <- final(s)
+    tax <- tax %>%
+      left_join(cpi) %>%
+      mutate(value_sa = value_sa/cpi * 1000)  %>%
+      select(-cpi)
+  } else {
+    tax <- NULL
+    taxStruct <- NULL
+  }
+  if (!length(okved)==0) {
+    prodRUB <- prodRUB_all %>%
+      filter(OKATO_id == '643') %>%
+      filter(OKVED %in% okved) %>%
+      filter(type %in% c('Полный круг', 'Крупные, средние и малые организации')) %>%
+      distinct() %>%
+      pad_by_time()
+    if (clean_rubprod) {
+      s <- tsclean(ts(prodRUB$value, freq=12, start=c(2005,1)), lambda=10)
+      plot(s)
+      s <- seas(s, outlier=NULL)
+      plot(s)
+    } else {
+      prodRUB$value <- na_seasplit(ts(prodRUB$value, freq=12, start=c(2005,1)), algorithm = 'kalman')
+      s <- seas(ts(prodRUB$value, freq=12, start=c(2005,1)))
+      plot(s)
+    }
+    prodRUB$value_sa <- final(s)*1000
+    prodRUB <- prodRUB %>%
+      left_join(cpi) %>%
+      mutate(value_sa = value_sa/cpi)
+    #wage
+    wage <- wage_all %>%
+      filter(OKATO_id == '643') %>%
+      filter(OKVED %in% okved) %>%
+      distinct() %>%
+      pad_by_time()
+    s <- seas(ts(wage$value, freq=12, start=c(2013,1)), force.type='denton')
+    plot(s)
+    wage$value_sa <- final(s)
+    # employment
+    empl <- empl_all %>%
+      filter(OKATO_id == '643') %>%
+      filter(OKVED %in% okved) %>%
+      distinct() %>%
+      pad_by_time()
+    fot <- fot_all %>%
+      filter(OKATO_id == '643') %>%
+      filter(OKVED %in% okved) %>%
+      distinct() %>%
+      pad_by_time()
+    s <- seas(ts(fot$value, freq=12, start=c(2017,1)), force.type='denton')
+    plot(s)
+    fot$value_sa <- final(s)
+    # capacity utilization
+    cap <- try(cap_all %>%
+      filter(OKVED %in% okved) %>%
+      mutate(date = as.Date(date)) %>%
+      pad_by_time())
+    if (!class(cap)=='try-error') {
+      cap$capacity <- na_seasplit(ts(cap$capacity, freq=12, start=c(
+        year(first(cap$date)), 
+        month(first(cap$date))
+      )))
+    } else {
+      cap <- NULL
+    }
+    # capital stock
+    capital <- capital_all %>%
+      filter(OKVED %in% okved) %>%
+      filter(OKATO == 'Российская Федерация') %>%
+      filter(firmtype %in% c('крупные и средние организации', 'Крупные и средние организации и организации с численностью работников до 15 человек, не являющиеся субъектами малого предпринимательства')) %>%
+      distinct() %>%
+      pad_by_time() %>%
+      mutate(value = value*1000)
+    capital$value <- as.numeric(na_seasplit(ts(capital$value, freq=4, start=c(
+      year(first(capital$date)), 
+      month(first(capital$date))
+    ))))
+    capital <- capital %>%
+      mutate(value = case_when(
+        quarter(date)==1 ~ value,
+        !quarter(date)==1 ~ value-lag(value)
+      )
+      )
+    capital <- capital %>%
+      left_join(capdef) %>%
+      mutate(value = value/capdef)
+    ts.plot(capital$value)
+    s <- seas(ts(capital$value, freq=4, start=c(2013,1)), force.type='denton')
+    plot(s)
+    capital$value_sa <- final(s)
+    # depreciation
+    depr <- depr_all %>%
+      filter(type=='Все основные фонды') %>%
+      filter(OKVED %in% okved) %>%
+      pull(value)
+  } else {
+    prodRUB <- NULL
+    wage <- NULL
+    empl <- NULL
+    fot <- NULL
+    cap <- NULL
+    capital <- NULL
+    depr <- NULL
+  }
+
+  # bind fedstat data
+  stocks <- rbind(stocks_sub_2010, stocks_sub_2017)
+  production_reg <- rbind(prod_reg_sub_2010, prod_reg_sub_2017)
+  production_reg <- production_reg %>% mutate(OKATO = ifelse(OKATO=='Кемеровская область', 'Кемеровская область - Кузбасс', OKATO)) %>% 
+    mutate(OKATO = ifelse(OKATO=='Чеченская Республика*', 'Чеченская Республика', OKATO)) %>% 
+    mutate(OKATO = ifelse(OKATO=='Республика Ингушетия*', 'Республика Ингушетия', OKATO))
+  # save if necessary
+  if (save) {
+    write_xlsx(production, paste('data_output/raw_supply_data/', categ, '_production.xlsx', sep=''))
+    write_xlsx(export_sub, paste('data_output/raw_supply_data/', categ, '_export.xlsx', sep=''))
+    write_xlsx(import_sub, paste('data_output/raw_supply_data/', categ, '_import.xlsx', sep=''))
+    write_xlsx(stocks, paste('data_output/raw_supply_data/', categ, '_stocks.xlsx', sep=''))
+    write_xlsx(production_FD, paste('data_output/raw_supply_data/', categ, '_production_FD.xlsx', sep=''))
+    write_xlsx(production_reg, paste('data_output/raw_supply_data/', categ, '_production_reg.xlsx', sep=''))
+    write_xlsx(price, paste('data_output/raw_supply_data/', categ, '_price_prod.xlsx', sep=''))
+    write_xlsx(retail, paste('data_output/raw_supply_data/', categ, '_retail.xlsx', sep=''))
+    write_xlsx(retail_FD, paste('data_output/raw_supply_data/', categ, '_retail_FD.xlsx', sep=''))
+    write_xlsx(retail_reg, paste('data_output/raw_supply_data/', categ, '_retail_reg.xlsx', sep=''))
+  }
+  # filter out problematic trade data
+  if (!is.null(exclude_partners$ex)) {
+    export_sub <- export_sub %>% filter(!STRANA %in% exclude_partners$ex)
+  }
+  if (!is.null(exclude_partners$im)) {
+    import_sub <- import_sub %>% filter(!STRANA %in% exclude_partners$im)
+  }
+  # calculate trade concentration indices
+  if (trade_type=='NETTO') {
+    import_concentr <- import_sub %>%
+      group_by(date) %>%
+      mutate(HHI_im = sum((NETTO/sum(NETTO))^2)) %>%
+      select(date, HHI_im) %>%
+      distinct(date, .keep_all=TRUE)
+    export_concentr <- export_sub %>%
+      group_by(date) %>%
+      mutate(HHI_ex = sum((NETTO/sum(NETTO))^2)) %>%
+      select(date, HHI_ex) %>%
+      distinct(date, .keep_all=TRUE)
+  } else {
+    import_concentr <- import_sub %>%
+      group_by(date) %>%
+      mutate(HHI_im = sum((KOL/sum(KOL))^2)) %>%
+      select(date, HHI_im) %>%
+      distinct(date, .keep_all=TRUE)
+    export_concentr <- export_sub %>%
+      group_by(date) %>%
+      mutate(HHI_ex = sum((KOL/sum(KOL))^2)) %>%
+      select(date, HHI_ex) %>%
+      distinct(date, .keep_all=TRUE)    
+  }
+  trade_concentr <- import_concentr %>%
+    ungroup() %>%
+    left_join(export_concentr) %>%
+    pad_by_time(date)
+  # summarize across all product groups
+  production <- production %>% group_by(date) %>%
+    summarise(value =  sum(value, na.rm=TRUE), OKEI = unique(OKEI)) %>%
+    mutate(value = ifelse(value==0, NA, value))
+    # mutate(value = ifelse(value < mean(value)/25, NA, value)) # ad hoc filter for incomplete data in fedstat
+  price <- price %>% group_by(date, OKPD_id, OKPD) %>%
+    summarise(value =  sum(value, na.rm=TRUE), OKEI = unique(OKEI), group=unique(group))
+  stocks <- stocks %>%
+    summarise(value =  sum(value, na.rm=TRUE), OKEI = unique(OKEI))
+    # mutate(value = ifelse(value < mean(value)/25, NA, value)) # ad hoc filter for incomplete data in fedstat
+  production_FD <- production_FD %>% 
+    group_by(date, OKATO) %>%
+    summarise(value =  sum(value, na.rm=TRUE), OKEI = unique(OKEI), OKATO_id = unique(OKATO_id)) %>%
+    group_by(OKATO)
+    # mutate(value = ifelse(value < mean(value)/70, NA, value)) # ad hoc filter for incomplete data in fedstat
+  production_reg <- production_reg %>% 
+    group_by(date, OKATO) %>%
+    summarise(value =  sum(value, na.rm=TRUE), OKEI = unique(OKEI), OKATO_id = unique(OKATO_id))
+    # group_by(OKATO) %>%
+    # mutate(value = ifelse(value < mean(value)/70, NA, value)) # ad hoc filter for incomplete data in fedstat
+  if (trade_type=='NETTO') {
+    trade_full <- rbind(import_sub %>% select(-KOL) %>% rename("value" = "NETTO"), 
+                        export_sub %>% select(-KOL) %>% rename("value" = "NETTO"))
+    import_sub <- import_sub %>% summarise(value =  sum(NETTO), EDIZM = unique(EDIZM))
+    export_sub <- export_sub %>% summarise(value =  sum(NETTO), EDIZM = unique(EDIZM))
+  } else {
+    trade_full <- rbind(import_sub %>% select(-NETTO) %>% rename("value" = "KOL"), 
+                        export_sub %>% select(-NETTO) %>% rename("value" = "KOL"))
+    import_sub <- import_sub %>% summarise(value =  sum(KOL), EDIZM = unique(EDIZM))
+    export_sub <- export_sub %>% summarise(value =  sum(KOL), EDIZM = unique(EDIZM))
+  }
+  # make conversion to same units
+  if (!is.null(convert)) {
+    production <- production %>% mutate(value = value * convert[1])
+    export_sub <- export_sub %>% mutate(value = value * convert[2])
+    import_sub <- import_sub %>% mutate(value = value * convert[3])
+    stocks <- stocks %>% mutate(value = value * convert[4])
+    production_FD <- production_FD %>% mutate(value = value * convert[1])
+    production_reg <- production_reg %>% mutate(value = value * convert[1])
+  }
+  # account for implicit missing values
+  export_sub <- export_sub %>% pad_by_time(date)
+  import_sub <- import_sub %>% pad_by_time(date)
+  stocks <- stocks %>% pad_by_time(date)
+  production_reg <- production_reg %>% group_by(OKATO, OKATO_id) %>% pad_by_time(date)
+  # replace missings with MA
+  if (missing_interp) {
+    production <- production %>% mutate(value = na_seasplit(value, find_frequency = TRUE))
+    export_sub <- export_sub %>% mutate(value = na_ma(value))
+    import_sub <- import_sub %>% mutate(value = na_ma(value))
+    stocks <- stocks %>% mutate(value = na_ma(value))
+    # production_FD <- production_FD %>% group_by(OKATO) %>% mutate(value = na_ma(value))
+    # production_reg <- production_reg %>% group_by(OKATO) %>% mutate(value = na_ma(value))
+  }
+  # collect results
+  result <- list(
+    'production' = production,
+    'export' = export_sub,
+    'import' = import_sub,
+    'stocks' = stocks,
+    'production_FD' = production_FD,
+    'production_reg' = production_reg,
+    'trade_concentr' = trade_concentr,
+    'trade_full' = trade_full,
+    'prod_price' = price,
+    'retail' = retail,
+    'retail_FD' = retail_FD,
+    'retail_reg' = retail_reg,
+    'cons_price' = cons_price,
+    'margin' = margin,
+    'tax' = tax,
+    'taxStruct' = taxStruct,
+    'prodRUB' = prodRUB,
+    'wage' = wage,
+    'empl' = empl,
+    'fot' = fot,
+    'cap' = cap,
+    'capital' = capital,
+    'depr' = depr,
+    'cpi' = cpi,
+    'TNVED' = paste(tn_keys, tn_names, sep=': '),
+    'OKPD' = paste(okpd_keys, okpd_names, sep=': '),
+    'OKPD2' = paste(okpd2_keys, okpd2_names, sep=': '),
+    'category' = categ,
+    'trade_type' = trade_type,
+    'prod_price_names' = prod_price_names,
+    'margin_whole' = margin_whole_name,
+    'margin_retail' = margin_retail_name,
+    'retail_names' = retail_names
+    )
+  return(result)
+}
+
+#' Prepare plots with text annotations
+#'
+#' @param data A list of length 8 returned by supply_data()
+#' @param ed A character vector specifying the name of the unit to be displayed in the graphs
+#'
+#' @return This is an internal functions which returns a list of length 5. (1)-(4) contain generated graphs and original data, (5) specifies the category name
+#' @export
+plotter <- function(data, ed) {
+  result <- list()
+  for (type in names(data)[1:6]) {
+    if (type=='production') {
+      df <- data$production
+      names <- paste(c('с 2010:', data$OKPD, 'с 2017:', data$OKPD2), collapse='\n')
+    } else if (type=='stocks') {
+      df <- data$stocks
+      names <- paste(c('с 2010:', data$OKPD, 'с 2017:', data$OKPD2), collapse='\n')
+    } else if (type=='export') {
+      df <- data$export
+      names <- paste(data$TNVED, collapse='\n')
+    } else if (type=='import') {
+      df <- data$import
+      names <- paste(data$TNVED, collapse='\n')
+    } else if (type=='production_FD') {
+      df <- cbind(data$production, sum = data$production_FD %>% group_by(date) %>% summarize(value = sum(value, na.rm=TRUE)) %>% select(value))
+      names(df)[4] <- 'sum'
+      rmse <- sqrt(sum((df$value - df$sum)^2/nrow(df), na.rm=TRUE))
+      names <- paste('RMSE между данными:', round(rmse,2))  
+    } else if (type=='production_reg') {
+      df <- data$production %>% 
+        left_join(data$production_reg %>% group_by(date) %>% summarize(sum = sum(value, na.rm=TRUE)) %>% select(date,sum))
+      
+      names(df)[4] <- 'sum'
+      rmse <- sqrt(sum((df$value - df$sum)^2/nrow(df), na.rm=TRUE))
+      names <- paste('RMSE между данными:', round(rmse,2))  
+    }
+    df <- as_tsibble(df)
+    names <- textGrob(names, gp=gpar(fontsize=8), just = "left")
+    p <-  df %>% ggplot() +
+      geom_line(aes(x=date, y=value)) +
+      xlab('') +
+      ylab(ed)
+    if (type=='production_FD') {
+      p <- p + geom_line(aes(x=date, y=sum), col='red')
+      df <- data$production_FD
+    } else if (type=='production_reg') {
+      p <- p + geom_line(aes(x=date, y=sum), col='red')
+      df <- data$production_reg
+    }
+    z <-  ggplot() + 
+      annotation_custom(names, xmax=0)
+    plot_i <- ggarrange(p, z, 
+                        ncol = 1, nrow = 2, heights = c(3,1), align = "v")  
+    result[[type]] <- list('graph' = plot_i, 'data' = df)
+  }
+  result[['category']] <- data$category
+  return(result)
+}
+
+
+#' Plot subgraphs on one canvas
+#'
+#' @param data A list returned by plotter()
+#' @param save A logical indicating whether the resulting graph should be saved
+#'
+#' @return Displays the generated graph
+#' @export
+all_plots <- function(data, save=TRUE) {
+  prod <- data[[1]][["graph"]]
+  stock <- data[[2]][["graph"]]
+  imp <- data[[3]][["graph"]]
+  exp <- data[[4]][["graph"]]
+  FD_RF <- data[["production_FD"]][["graph"]]
+  reg_RF <- data[["production_reg"]][["graph"]]
+  p <- ggarrange(prod, stock, imp, exp, FD_RF, reg_RF, ncol=2, nrow=3, labels=c('Производство', 'Экспорт', 'Импорт',
+                                                                 'Запасы', 'Производство: ФО VS РФ',
+                                                                 'Производство: субъекты VS РФ'))
+  if (save) {
+    ggsave(paste('fig/supply_analysis/', data$category, '.jpg', sep=''), scale = 4)
+  }
+  p
+}
+
+#' Data preparation for plotting
+#'
+#' @param data A list returned by supply_data()
+#'
+#' @return Returns a list with all the data prepared for plotting
+#' @export
+prepare_data <- function(data, ed, ed_tradeprice, retail_manual = NULL) {
+  df <- data$production[0,-3]
+  df$type <- NA
+  df_sa <- df
+  dates <- c()
+  for (i in names(data)[1:4]) {
+    temp <- data[[i]][,-3]
+    if (!i=='stocks') dates <- c(dates, last(temp$date))
+    # perform seasonal adjustment and outlier correction
+    temp_sa <- temp
+    # a) prepare data
+    start <- c(year(temp$date[1]), month(temp$date[1]))
+    t <- ts(temp$value, frequency = 12, start=start)
+    
+    # s_stl <- stl(log(t), s.window="periodic")
+    # trend <- as.numeric(s_stl$time.series[,'trend'] + s_stl$time.series[,'remainder'])
+    # temp_sa$value <- exp(trend)
+    s <- seas(t, outlier=NULL)
+    temp_sa$value <- as.numeric(final(s))
+    temp$type <- switch(
+      i,
+      "production" = "Внутреннее производство",
+      "export" = "Экспорт",
+      "import" = "Импорт",
+      "stocks" = "Изменение товарных запасов"
+    )
+    temp_sa$type <- temp$type
+    temp <- temp %>% filter(date >= as.Date('2014-01-01'))
+    temp_sa <- temp_sa %>% filter(date >= as.Date('2014-01-01'))
+    if (i == 'stocks') {
+      temp <- temp %>%
+        mutate(value = -difference(value))
+      temp_sa <- temp_sa %>%
+        mutate(value = -difference(value))
+    }
+    if (i == 'export') {
+      temp <- temp %>%
+        mutate(value = -value)
+      temp_sa <- temp_sa %>%
+        mutate(value = -value)
+    }
+    df <- rbind(df, temp)
+    df_sa <- rbind(df_sa, temp_sa)
+  }
+  df <- df %>%
+    group_by(date) %>%
+    filter(date <= min(as.Date(dates))) %>% # ensure that we plot months where all data is available except for stocks
+    summarize(total = sum(value, na.rm=TRUE), across()) %>%
+    ungroup()
+  df_sa <- df_sa %>%
+    group_by(date) %>%
+    filter(date <= min(as.Date(dates))) %>% # ensure that we plot months where all data is available except for stocks
+    summarize(total = sum(value, na.rm=TRUE), across()) %>%
+    ungroup()
+  # make seasonal adjustment across Federal Districts separately
+  df_FD <- data$production_FD
+  df_FD_sa <- df_FD
+  for (i in unique(df_FD$OKATO)) {
+    temp <- df_FD[df_FD$OKATO==i,]
+    start <- c(year(temp$date[1]), month(temp$date[1]))
+    t <- ts(temp$value, frequency = 12, start=start)
+    # s_stl <- try(stl(log(t), s.window="periodic"))
+    # if (!class(s_stl)=='try-error') {
+    #   trend <- as.numeric(s_stl$time.series[,'trend'])
+    #   df_FD_sa[df_FD_sa$OKATO==i,'value'] <- exp(trend)
+    # }
+    s <- try(seas(t, outlier = NULL))
+    if (!class(s)=='try-error') {
+      df_FD_sa[df_FD_sa$OKATO==i,'value'] <- as.numeric(final(s))
+    }
+  }
+  # calculate various trade metrics
+  # trade_concentr <- data$trade_concentr %>%
+  #   mutate(HHI_im_sa = exp(stl(log(ts(HHI_im, frequency=12, start=c(year(data$trade_concentr$date[1]), month(data$trade_concentr$date[1])))), s.window="periodic")$time.series[,'trend']),
+  #          HHI_ex_sa = exp(stl(log(ts(HHI_ex, frequency=12, start=c(year(data$trade_concentr$date[1]), month(data$trade_concentr$date[1])))), s.window="periodic")$time.series[,'trend']))
+  trade_concentr <- data$trade_concentr %>%
+    mutate(HHI_im_sa = as.numeric(final(seas(
+      ts(HHI_im, frequency=12, start=c(year(data$trade_concentr$date[1]), month(data$trade_concentr$date[1])))
+      , outlier=NULL))),
+      HHI_ex_sa = as.numeric(final(seas(
+        ts(HHI_ex, frequency=12, start=c(year(data$trade_concentr$date[1]), month(data$trade_concentr$date[1])))
+        , outlier=NULL)))
+    )
+  # country_codes <- get_country()
+  # trade_country <- data$trade_full %>% 
+  #   left_join(country_codes, c("STRANA" = "KOD")) %>%
+  #   group_by(date, NAPR) %>%
+  #   arrange(desc(value)) %>%
+  #   mutate(Index = 1:n(), NAME = ifelse(Index > 3, "Прочие", str_to_title(NAME, locale='ru'))) %>%
+  #   group_by(NAME, date, NAPR) %>% 
+  #   summarise(value = sum(value))
+  country_codes <- get_country() %>% add_row(KOD = "NN", NAME = "Неизвестно")
+  trade_country <- data$trade_full %>% 
+    left_join(country_codes, c("STRANA" = "KOD")) %>%
+    group_by(NAPR, EDIZM, date, NAME) %>%
+    mutate(value = sum(value)) %>%
+    distinct(NAPR, EDIZM, date, NAME, value) %>%
+    ungroup() %>%
+    group_by(date, NAPR) %>%
+    arrange(desc(value)) %>%
+    mutate(Index = 1:n(), NAME = ifelse(Index > 3, "Прочие", str_to_title(NAME, locale='ru'))) %>%
+    group_by(NAME, date, NAPR) %>% 
+    summarise(value = sum(value))
+  
+  trade_shares <- df_sa %>%
+    group_by(date) %>%
+    mutate(share = abs(value)/total) %>%
+    filter(type %in% c('Экспорт', 'Импорт'))
+  usd_m <- get_fx_moex(fx = "ESD/RUB", start_date = "2014-01-01", freq='monthly')
+  usd_m <- data.frame(usd_m, date = as.Date(zoo::index(usd_m))) %>% as_tibble()
+  trade_price <- data$trade_full %>%
+    group_by(date, NAPR) %>%
+    summarize(value = sum(value, na.rm=TRUE), STOIM = sum(STOIM, na.rm=TRUE), EDIZM=unique(EDIZM)) %>%
+    mutate(mean_price = STOIM/value) %>%
+    left_join(usd_m) %>%
+    mutate(mean_price_rub = mean_price * exrate)
+  if (!is.null(data$retail)) {
+    # from cumulative to period values of retail sales
+    df_retail <- data$retail %>%
+      mutate(value = case_when(
+        quarter(date) == 1 ~ value,
+        !quarter(date) == 1 ~ value - lag(value),
+      ))
+    df_retail_FD <- data$retail_FD %>%
+      filter(!OKATO == "Крымский федеральный округ") %>%
+      group_by(OKATO_id) %>%  
+      mutate(value = case_when(
+        quarter(date) == 1 ~ value,
+        !quarter(date) == 1 ~ value - lag(value),
+      )) %>%
+      ungroup() %>%
+      group_by(date) 
+    # convert monetary sales to unit sales
+    df_retail <- df_retail %>% left_join(data$cons_price %>% filter(OKATO_id == '643') %>% select(date, value) %>% rename("price" = "value"), by="date") %>%
+      mutate(value_r = value / price)
+    
+
+    
+    df_retail_FD <- df_retail_FD %>%
+      left_join(data$cons_price %>% filter(!OKATO == 'Южный федеральный округ (по 2009 год)') %>% select(date, OKATO_id, value) %>% rename("price" = "value"), by=c("date", "OKATO_id")) %>%
+      mutate(value_r = value / price)
+    df_retail_FD <- df_retail_FD %>%
+      distinct(date, OKATO_id, .keep_all=T) %>%
+      arrange(OKATO_id, date)
+    # perform seasonal adjustmet of unit sales
+    df_retail_sa <- df_retail
+    start <- c(year(df_retail_sa$date[1]), month(df_retail_sa$date[1]))
+    t <- ts(df_retail_sa$value_r, frequency = 4, start=start)
+    s <- try(seas(t, outlier = NULL))
+    if (!class(s)=='try-error') {
+      df_retail_sa$value_r <- c(as.numeric(final(s)),
+                                rep(NA, nrow(df_retail_sa)-length(final(s))))
+    }
+    df_retail_FD_sa <- df_retail_FD
+    for (i in unique(df_retail_FD$OKATO_id)) {
+      sub <- df_retail_FD %>% filter(OKATO_id == i)
+      start <- c(year(sub$date[1]), month(sub$date[1]))
+      temp <- ts(sub$value_r, frequency=4, start=start)
+      s <- try(seas(temp, outlier = NULL))
+      if (!class(s) =='try-error') {
+        df_retail_FD_sa[df_retail_FD_sa$OKATO_id == i, 'value_r'] <- c(as.numeric(final(s)),
+                                                                       rep(NA, nrow(df_retail_FD_sa[df_retail_FD_sa$OKATO_id == i, 'value_r'])-length(final(s))))
+      }
+      temp <- ts(sub$value, frequency=4, start=start)
+      s <- try(seas(temp, outlier = NULL))
+      if (!class(s) =='try-error') {
+        df_retail_FD_sa[df_retail_FD_sa$OKATO_id == i, 'value'] <- c(as.numeric(final(s)),
+                                                                       rep(NA, nrow(df_retail_FD_sa[df_retail_FD_sa$OKATO_id == i, 'value'])-length(final(s))))
+      }
+    }
+    df_retail_FD_sa <- df_retail_FD_sa %>%
+      group_by(date) %>%
+      summarize(total = sum(value_r, na.rm=TRUE), across()) %>%
+      ungroup() %>% arrange(date)
+    df_retail_reg <- data$retail_reg
+    df_retail_FD_sa %>% ggplot() +
+      geom_line(aes(x=date, y=value_r, col=OKATO, group=OKATO)) +
+      theme(legend.position='none')
+  } else {
+    df_retail=NULL
+    df_retail_sa=NULL
+    df_retail_FD=NULL
+    df_retail_reg=NULL  
+    df_retail_FD_sa=NULL
+  }
+  
+  if (!is.null(retail_manual)) {
+    df_retail <- retail_manual %>%
+      drop_na()
+    names(df_retail) <- c('date', 'value', 'value_r')
+    df_retail_sa <- df_retail
+    
+    start <- c(year(df_retail_sa$date[1]), month(df_retail_sa$date[1]))
+    t <- ts(df_retail_sa$value, frequency = 4, start=start)
+    s <- try(seas(t, outlier = NULL))
+    if (!class(s)=='try-error') {
+      df_retail_sa$value <- c(as.numeric(final(s)),
+                                rep(NA, nrow(df_retail_sa)-length(final(s))))
+    }
+    t <- ts(df_retail_sa$value_r, frequency = 4, start=start)
+    s <- try(seas(t, outlier = NULL))
+    if (!class(s)=='try-error') {
+      df_retail_sa$value_r <- c(as.numeric(final(s)),
+                                rep(NA, nrow(df_retail_sa)-length(final(s))))
+    }
+  }
+           
+  result <- list('df' = df,
+                 'df_sa' = df_sa,
+                 'df_FD' = df_FD,
+                 'df_FD_sa' = df_FD_sa,
+                 'df_reg' = data$production_reg,
+                 'trade_concentr' = trade_concentr,
+                 'trade_country' = trade_country,
+                 'trade_shares' = trade_shares,
+                 'trade_price' = trade_price,
+                 'prod_price' = data$prod_price,
+                 'cons_price' = data$cons_price,
+                 'df_retail' = df_retail,
+                 'df_retail_sa' = df_retail_sa,
+                 'df_retail_FD' = df_retail_FD,
+                 'df_retail_reg' = df_retail_reg,
+                 'df_retail_FD_sa' = df_retail_FD_sa,
+                 'margin' = data$margin,
+                 'tax' = data$tax,
+                 'taxStruct' = data$taxStruct,
+                 'prodRUB' = data$prodRUB,
+                 'wage' = data$wage,
+                 'empl' = data$empl,
+                 'fot' = data$fot,
+                 'cap' = data$cap,
+                 'capital' = data$capital,
+                 'cpi' = cpi,
+                 'depr' = data$depr,
+                 'TNVED' = data$TNVED,
+                 'OKPD' = data$OKPD,
+                 'OKPD2' = data$OKPD2,
+                 'category' = data$category,
+                 'ed' = ed,
+                 'ed_tradeprice' = ed_tradeprice,
+                 'trade_type' = data$trade_type,
+                 'prod_price_names' = data$prod_price_names,
+                 'margin_whole' = data$margin_whole,
+                 'margin_retail'= data$margin_retail,
+                 'retail_names' = data$retail_names)
+  saveit(result, where='data_output/supply_analysis/', string=data$category)
+  return(result)
+}
+counterfeitCalc <- function(data, cnt = NULL, loess_span = NULL, date_for_graph = NA) {
+  
+  # if (!is.null(data$df_retail)) {
+  #   
+  #   ## COUNTERFEIT CALCULATION
+  #   # supply, mln. units
+  #   
+  #   rev_coeff <- data.frame(read_xlsx('data_inputs/other/retail_sales_calc.xlsx', sheet=2))
+  #   
+  #   if (!is.null(rev_coeff_col)) {
+  #     if (rev_coeff_col=='none') {
+  #       rev_coeff <- 1
+  #     } else {
+  #       rev_coeff <- as.numeric(rev_coeff[,rev_coeff_col])
+  #     }
+  #   } else {
+  #     rev_coeff <- as.numeric(rev_coeff[,2])
+  #   }
+  #   
+  #   
+  #   ts.plot(rev_coeff)
+  #   
+  #   # rev_coeff[c(3:4,7)] <- NA
+  #   # rev_coeff <- na.approx(rev_coeff, na.rm=FALSE)
+  #   # rev_coeff <- lowess(rev_coeff, f=0.4)$y
+  #   # ts.plot(rev_coeff)
+  #   qvar <- seq(as.Date('2011-01-01'), by='year', to=as.Date('2020-01-01'))
+  #   rev_coeff <- data.frame(coeff=rev_coeff, date=qvar) %>%
+  #     pad_by_time(.by='quarter')
+  #   rev_coeff <- rev_coeff %>%
+  #     mutate(coeff = na.approx(coeff, na.rm=FALSE))
+  #   ts.plot(rev_coeff$coeff)
+  #   
+  #   
+  #   s <- data$df_sa %>% distinct(date, .keep_all = TRUE) %>%
+  #     select(-type, -value) %>%
+  #     group_by(date = as.Date(yearquarter(date))) %>%
+  #     summarise(supply = sum(total, na.rm=TRUE))
+  #   
+  #   # sales: thousand rubles / (ruble / package) = thousand packages; * sales_conversion = mln units
+  #   if (!is.null(data$df_retail_FD_sa)) {
+  #     d <- data$df_retail_FD_sa %>%
+  #       group_by(date) %>%
+  #       summarise(sales = sum(value_r, na.rm=TRUE) * sales_conversion) %>%
+  #       left_join(rev_coeff) %>%
+  #       mutate(coeff = na_locf(coeff)) %>%
+  #       mutate(sales = sales * coeff)
+  #   } else {
+  #     d <- data$df_retail_sa %>%
+  #       group_by(date) %>%
+  #       summarise(sales = sum(value_r, na.rm=TRUE) * sales_conversion) %>%
+  #       left_join(rev_coeff) %>%
+  #       mutate(coeff = na_locf(coeff)) %>%
+  #       mutate(sales = sales * coeff)
+  #   }
+  #   # writexl::write_xlsx(data$df_retail_FD_sa %>%
+  #   #                       group_by(date) %>%
+  #   #                       summarise(sales = sum(value_r, na.rm=TRUE) * sales_conversion/1000), 'data_output/15.07/sales.xlsx')
+  #   # writexl::write_xlsx(data$df_retail_FD_sa %>%
+  #   #                       group_by(date) %>%
+  #   #                       summarise(sales = sum(value_r, na.rm=TRUE) * sales_conversion/1000) %>%
+  #   #                       left_join(rev_coeff) %>%
+  #   #                       mutate(coeff = na_locf(coeff)), 'data_output/15.07/sales2.xlsx')
+  #   # writexl::write_xlsx(data$df_sa, 'data_output/15.07/supply.xlsx')
+  #   counterfeit <- s %>% 
+  #     left_join(d) %>%
+  #     filter(complete.cases(s)) %>%
+  #     mutate(counterfeit = (sales-supply)/(sales) * 100) %>% 
+  #     drop_na()
+  #   if (is.null(loess_span)) {
+  #     smooth <- (rollsum(counterfeit$sales, k=4, align='left') - rollsum(counterfeit$supply, k=4, align='left'))/rollsum(counterfeit$sales, k=4, align='left')*100
+  #     smooth <- c(rep(NA,3), smooth)
+  #   } else {
+  #     n=nrow(counterfeit)
+  #     m <- loess(counterfeit ~ seq(1, length.out=n), span=loess_span, data=counterfeit)
+  #     smooth <- fitted(m)
+  #   }
+  #   counterfeit <- counterfeit %>%
+  #     mutate(counterfeit_smooth = smooth)
+  #   counterfeit %>%
+  #     pivot_longer(-c(date, coeff, counterfeit, counterfeit_smooth)) %>%
+  #     ggplot() +
+  #     geom_line(aes(x=date, y=value, col=name, group=name)) + 
+  #     theme(legend.position='bottom')
+  #   counterfeit %>%
+  #     pivot_longer(-c(date, coeff, supply, sales)) %>%
+  #     ggplot() +
+  #     geom_line(aes(x=date, y=value, col=name, group=name)) + 
+  #     theme(legend.position='bottom')
+  #   # counterfeit volumes: mln units and mln rubles
+  #   cntft_volume_units <- last(counterfeit$counterfeit_smooth)*last(counterfeit$sales)/100                    
+  #   
+  #   # excise <- 3.3*20
+  #   # vat <- 0.2
+  #   # margin_retail <- last(data$margin %>% filter(str_detect(name, 'розн')) %>% pull(value))
+  #   # margin_whole <- last(data$margin %>% filter(str_detect(name, 'оптов')) %>% pull(value))
+  #   # last_price <- last(data$cons_price %>% filter(OKATO_id=='643') %>% pull(value))
+  #   # cntft_volume_rub_1 <- cntft_volume_units / sales_conversion * (last_price-excise) / (1+vat) / (1+margin_whole) / (1+margin_retail)
+  #   
+  #   last_price_prod <- try(last(data$prod_price %>% pull(value)))
+  #   if (class(last_price_prod)=='try-error') {
+  #     print('Supply latest producer price value manually through last_price_prod!')
+  #   }
+  #   cntft_volume_rub <- cntft_volume_units * last_price_prod / sales_conversion / 10^3
+  # } 
+  # else {
+  #   counterfeit = NA
+  #   cntft_volume_units = NA
+  #   cntft_volume_rub = NA
+  # }
+  if (!is.null(cnt)) {
+    names(cnt) <- c('date', 'counterfeit')
+    
+    counterfeit <- cnt %>%
+      mutate(date = as.Date(date), counterfeit = counterfeit*100) %>%
+      mutate(counterfeit_smooth = lowess(counterfeit, f=loess_span)$y)
+    ts.plot(counterfeit$counterfeit_smooth)
+    cntft_volume_units = NA
+    cntft_volume_rub = NA
+    
+    data[['counterfeit']] <- counterfeit
+    data[['cntft_volume_units']] <- cntft_volume_units
+    data[['cntft_volume_rub']] <- cntft_volume_rub
+    data[['markingDate']] <- date_for_graph
+    write_xlsx(counterfeit, paste0('data_output/cntf/', data$category, '.xlsx'))
+    
+  } else {
+    data[['counterfeit']] <- NA
+    data[['cntft_volume_units']] <- NA
+    data[['cntft_volume_rub']] <- NA
+    data[['markingDate']] <- NA
+  }
+  
+  saveit(data, where='data_output/supply_analysis/', string=data$category)
+  return(data)
+}
+calcCapStock <- function(data, g_type='trend', g_value=NULL, delta_type='gks', delta_value=NULL) {
+  if (!is.null(data$capital)) {
+    # depreciation rate
+    if (delta_type=='gks') {
+      delta <- data$depr                 
+    } else {
+      delta <- delta_value
+    }
+    # initial investment value
+    I0 <- first(data$capital$value_sa) 
+    if (g_type=='trend') {
+      # estimate LR (trend) investment growth rate
+      cap_m <- lm(log(data$capital$value_sa) ~ seq(1, nrow(data$capital)))
+      print(summary(cap_m))
+      check_df <- cbind(cap_m$model, fitted(cap_m))
+      names(check_df) <- c('cap', 'n', 'fit')
+      p <- check_df %>%
+        select(n, cap, fit) %>%
+        pivot_longer(-n) %>%
+        ggplot() +
+        geom_line(aes(x=n, y=exp(value), group=name, col=name))
+      print(p)
+      g <- as.numeric(coef(cap_m)[2])
+    } 
+    if (g_type=='average') {
+      g <- (last(capital$value_sa)/first(capital$value_sa))^(1/(nrow(capital)-1))-1
+    }
+    if (g_type=='user') {
+      g = g_value
+    }
+    # initial capital stock
+    capstock <- I0/(g+delta)        
+    for (i in 2:nrow(data$capital)) {
+      capstock[i] <- capstock[i-1]*(1-delta)^(1/4) + data$capital$value_sa[i]
+    }
+    capstock <- data.frame(capital = capstock, date = data$capital$date)
+    print(ts.plot(capstock$capital))
+  } else {
+    capstock <- NA
+  }
+  data[["capstock"]] <- capstock
+  saveit(data, where='data_output/supply_analysis/', string=data$category)
+  return(data)
+}
+fcast_plot <- function(df, varnames, date_mark) {
+  df <- df %>%
+    select(date, varnames)
+  names(df) <- c('date', 'Фактическое значение', 'Прогноз')
+  df %>%
+    pivot_longer(-date) %>%
+    ggplot() +
+    geom_line(aes(x=date, y=value, col=name), size=0.7) +
+    xlab('') +
+    ylab('') +
+    geom_vline(xintercept = date_mark) +
+    annotate('text', label='Дата начала ОЦМ в отрасли', x=date_mark-months(13), y=max(df$`Фактическое значение`, na.rm=T)*0.97, size=4.5) +
+    scale_color_manual(name='', values=c("Фактическое значение"="red", "Прогноз"="blue")) +
+    theme(legend.text = element_text(size=12))
+}
+estMeanChange <- function(data, smooth_span_m=0.1, smooth_span_q=0.2, date_mark_m = NULL, date_mark_q = NULL, price_model=NULL, year_sales=NULL, taxcatnames = NULL) {
+  if (!is.null(date_mark_m)) {
+    dat <- data$empl %>%
+      select(date, value) %>%
+      rename("empl"="value") %>%
+      left_join(data$prodRUB %>%
+                  select(date, value_sa, cpi) %>%
+                  rename("prod"="value_sa")
+      ) %>%
+      left_join(data$df_sa %>%
+                  filter(type=='Внутреннее производство') %>%
+                  select(date, value) %>%
+                  rename("prod_u"="value")) %>%
+      left_join(data$cap %>% select(date, capacity)) %>%
+      mutate(covid = ifelse(date==as.Date('2020-03-01'), 1, 0)) %>%
+      mutate(across(.cols=c('empl','prod', 'prod_u', 'capacity'), ~ lowess(.x, f=smooth_span_m)$y )) %>%
+      mutate(implied_cap = prod/capacity*100)
+    tax_data <- data$tax %>% ungroup() %>% select(date, value_sa) %>% rename("tax"="value_sa") %>%
+      mutate(across(.cols=c('tax'), ~ lowess(.x, f=smooth_span_q)$y ))
+    # ts.plot(tax_data$tax)
+    # dat <- dat %>%
+    #   mutate(dum = ifelse(date>=date_mark, 1, 0)) %>%
+    #   mutate(trend = seq(1, nrow(dat)))
+    # capacityModel <- lm(capacity ~ dum, data=dat)
+    # summary(capacityModel)
+    # emplModel <- lm(empl ~ trend + dum, data=dat)
+    # summary(emplModel)
+    # prodModel <- lm(log(prod) ~ trend + dum, data=dat)
+    # summary(prodModel)
+    # ts.plot(fitted(prodModel))
+    # date_mark <- as.Date('2019-10-01')
+    # n <- which(dat$date==date_mark)
+    # dat <- dat %>%
+    #   mutate(dum = ifelse(date>=date_mark, 1, 0)) %>%
+    #   mutate(trend = row_number()-n)
+    # capacityModel <- lm(prod ~ trend + dum + dum*trend, data=dat)
+    # summary(capacityModel)
+    # ts.plot(fitted(capacityModel))
+    
+    date_mark_m <- as.Date(date_mark_m)
+    date_mark_q <- as.Date(date_mark_q)
+    
+    n <- which(dat$date==date_mark_m)
+    n_q <- which(tax_data$date==date_mark_q)
+    h_q <- nrow(tax_data) - n_q
+    h <- nrow(dat) - n
+    
+    arCap <- arima(dat$capacity[1:n], order=c(1,1,0))
+    summary(arCap)
+    # plot(forecast(arCap, h=h))
+    f <- forecast(arCap, h=h)$mean
+    dat$capacity_arima <- NA
+    dat$capacity_arima[(n+1):(n+h)] <- f
+    d_cap <- dat$capacity - dat$capacity_arima
+    #ts.plot(d_cap)
+    g <- ggplot(dat) +
+      geom_line(aes(x=date, y=capacity)) +
+      geom_line(aes(x=date, y=capacity_arima, col='blue'))
+    print(g)
+    d_cap <- mean(d_cap, na.rm=TRUE)
+    
+    arEmpl <- arima(log(dat$empl[1:n]), order=c(1,1,0))
+    summary(arEmpl)
+    # plot(forecast(arEmpl, h=h))
+    f <- exp(forecast(arEmpl, h=h)$mean)
+    dat$empl_arima <- NA
+    dat$empl_arima[(n+1):(n+h)] <- f
+    d_empl <- dat$empl - dat$empl_arima
+    # ts.plot(d_empl)
+    g <- ggplot(dat) +
+      geom_line(aes(x=date, y=empl)) +
+      geom_line(aes(x=date, y=empl_arima, col='blue'))
+    print(g)
+    d_empl <- mean(d_empl, na.rm=TRUE)  
+    
+    
+    arProd <- arima(log(dat$prod[1:n]), order=c(1,1,0))
+    summary(arProd)
+    # plot(forecast(arProd, h=h))
+    f <- exp(forecast(arProd, h=h)$mean)
+    dat$prod_arima <- NA
+    dat$prod_arima[(n+1):(n+h)] <- f
+    d_prod <- (dat$prod - dat$prod_arima)*last(dat[!is.na(dat$cpi),]$cpi)
+    # ts.plot(d_prod)
+    g <- ggplot(dat) +
+      geom_line(aes(x=date, y=prod)) +
+      geom_line(aes(x=date, y=prod_arima, col='blue'))
+    print(g)
+    d_prod <- mean(d_prod, na.rm=TRUE)
+    prod_shock = d_prod/last(dat[!is.na(dat$prod),]$prod)
+    d_prod <- d_prod*12
+    
+    
+    d_cap_implied <- (dat$prod - dat$prod_arima)/dat$implied_cap
+    d_cap_implied <- mean(d_cap_implied, na.rm=TRUE)*100
+    
+    arTax <- arima(log(tax_data$tax[1:n_q]), order=c(1,1,0))
+    summary(arTax)
+    # plot(forecast(arTax, h=h_q))
+    f <- exp(forecast(arTax, h=h_q)$mean)
+    tax_data$tax_arima <- NA
+    tax_data$tax_arima[(n_q+1):(n_q+h_q)] <- f
+    d_tax <- (tax_data$tax - tax_data$tax_arima)
+    # ts.plot(d_tax)
+    g <- ggplot(tax_data) +
+      geom_line(aes(x=date, y=tax)) +
+      geom_line(aes(x=date, y=tax_arima, col='blue'))
+    print(g)
+    d_tax <- mean(d_tax, na.rm=TRUE)*4
+    
+    d_fot <- d_empl * last(data$wage$value_sa) * 12
+    
+    tax_change_pct <- data$delta_tax$tax_elast * prod_shock
+    d_tax_implied <- (exp(last(log(tax_data$tax)) + tax_change_pct) - exp(last(log(tax_data$tax))))*4*last(dat[!is.na(dat$cpi),]$cpi)
+    
+    # calculate implied costs in rubles
+    if (!is.null(price_model)) {
+      price_impact <- max(price_model[["decomp2"]]$marking)
+      sales_volume <- data$df_retail %>%
+        filter(year(date)==year_sales) %>%
+        summarize(value=sum(value, na.rm=TRUE)) %>%
+        pull(value)
+      marking_cost <- price_impact * sales_volume * 10^3
+    } else {
+      marking_cost <- NULL
+    }
+    
+    data[["taxStruct"]]$type = taxcatnames
+    
+    result <- list(
+      d_cap = d_cap,
+      d_cap_implied = d_cap_implied,
+      d_prod = d_prod,
+      d_empl = d_empl,
+      d_fot = d_fot,
+      d_tax = d_tax,
+      d_tax_implied = d_tax_implied,
+      marking_cost = marking_cost,
+      rawfcast = dat
+    )
+  } else {
+    result <- NA
+  }
+  data[['meanImpact']] <- result
+  saveit(data, where='data_output/supply_analysis/', string=data$category)
+  return(data)
+}
+
+estCobbDouglas <- function(data, crs = TRUE, robust = TRUE, capacity_corr = TRUE) {
+  if (!is.null(data$empl)) {
+    yearly <- FALSE
+    if (yearly) {
+      CD_data <- data$empl %>%
+        select(date, value) %>%
+        group_by(date=year(date)) %>%
+        summarize(empl = mean(value)) %>%
+        left_join(data$capstock %>%
+                    select(date, capital) %>%
+                    group_by(date=year(date)) %>%
+                    summarize(capital = mean(capital, na.rm=TRUE))) %>% 
+        left_join(data$prodRUB %>%
+                    select(date, value_sa) %>%
+                    rename("prod"="value_sa") %>%
+                    group_by(date=year(date)) %>%
+                    summarize(prod = sum(prod, na.rm=TRUE))
+        ) %>%
+        drop_na() %>%
+        left_join(data$df_sa %>%
+                    filter(type=='Внутреннее производство') %>%
+                    select(date, value) %>%
+                    rename("prod_u"="value") %>%
+                    group_by(date=year(date)) %>%
+                    summarize(prod_u = sum(prod_u, na.rm=TRUE)))
+    } else {
+      CD_data <- data$empl %>%
+        select(date, value) %>%
+        group_by(date=as.Date(yearquarter(date))) %>%
+        summarize(empl = mean(value)) %>%
+        left_join(data$capstock) %>% 
+        left_join(data$prodRUB %>%
+                    select(date, value_sa) %>%
+                    rename("prod"="value_sa") %>%
+                    group_by(date=as.Date(yearquarter(date))) %>%
+                    summarize(prod = sum(prod, na.rm=TRUE))
+        ) %>%
+        drop_na() %>%
+        left_join(data$df_sa %>%
+                    filter(type=='Внутреннее производство') %>%
+                    select(date, value) %>%
+                    rename("prod_u"="value") %>%
+                    group_by(date=as.Date(yearquarter(date))) %>%
+                    summarize(prod_u = sum(prod_u, na.rm=TRUE)))
+      if (capacity_corr) {
+        CD_data <- CD_data %>%
+          left_join(data$cap %>% select(date, capacity)) %>%
+          mutate(capital = capital*capacity/100) %>%
+          drop_na()
+      }
+    }
+    
+    # CD_data$implied_price <- CD_data$prod/10^6/CD_data$prod_u * (1+0.2) *(1+margin_retail) * (1+margin_whole) *20 + excise
+    
+    y <- CD_data$prod
+    l <- CD_data$empl
+    k <- CD_data$capital
+    if (robust) {
+      mod_fun <- MASS::rlm
+    } else {
+      mod_fun <- lm
+    }
+    if (!crs) {
+      m <- mod_fun(log(y) ~ log(l) + log(k))
+      print(summary(m))
+      alpha <- as.numeric(coef(m)[2])
+      beta <- as.numeric(coef(m)[3])
+      A <- exp(residuals(m))
+      B <- exp(as.numeric(coef(m)[1]))
+    } else {
+      m <- mod_fun(log(y) ~ log(l) + log(k))
+      print(summary(m))
+      L <- matrix(c(0, 1, 1), nrow = 1, byrow = TRUE)
+      rr <- c(1)
+      print(car::linearHypothesis(m, hypothesis.matrix = L, rhs = rr))
+      m <- mod_fun(log(y) ~ offset(log(l)) + I(log(k) - log(l)))
+      print(summary(m))
+      beta <- as.numeric(coef(m)[2])                  # capital coefficient
+      alpha <- 1-beta                                 # labour coefficient
+      B <- as.numeric(exp(as.numeric(coef(m)[1])))    # normalizing constant
+      A <- as.numeric(exp(residuals(m)))              # Solow residual
+    }
+    if (robust) {
+      check_df <- data.frame(cbind(m$model[,1], fitted(m), seq(1,length(m$model[,1]))))
+    } else {
+      check_df <- data.frame(cbind(m$model[,1], fitted(m), seq(1, nrow(m$model))))
+    }
+    names(check_df) <- c('prod', 'fit', 'n')
+    g <- check_df %>%
+      select(n, prod, fit) %>%
+      pivot_longer(-n) %>%
+      ggplot() +
+      geom_line(aes(x=n, y=value, group=name, col=name))
+    print(g)
+    result <- list(
+      m = m,
+      alpha = alpha,
+      beta = beta,
+      A = A,
+      B = B,
+      l = l,
+      k = k,
+      y = y,
+      g = g
+    )
+  } else {
+    result <- NA
+  }
+  data[["CobbDouglasEst"]] <- result
+  saveit(data, where='data_output/supply_analysis/', string=data$category)
+  return(data)
+}
+calcCobbDouglas <- function(data, r, w) {
+  if (!is.na(data$CobbDouglasEst)[1]) {
+    model <- data$CobbDouglasEst
+    shock <- data$cntft_volume_rub*10^6/last(data$prodRUB$cpi)
+    alpha <- model$alpha
+    beta <- model$beta
+    A <- model$A
+    B <- model$B
+    K0 <- last(model$k)
+    L0 <- last(model$l)
+    Y0 <- last(model$y)
+    A0 <- last(model$A)
+    r_q <- (1+r+data$depr)^(1/4) - 1 
+    w_q <- w*4
+    # w_r <- (mean(model$l)/mean(model$k) * beta/alpha)^(-1)  # model-implied w/r ratio
+    w_r <- (L0/K0 * beta/alpha)^(-1)  # model-implied w/r ratio
+    dK <- as.numeric( ((shock) /(B)) ^(1/(alpha+beta)) * (w_q/r_q * beta/alpha)^(alpha/(alpha+beta)) )
+    dL <- as.numeric( ((shock) /(B)) ^(1/(alpha+beta)) * (w_q/r_q * beta/alpha)^(-beta/(alpha+beta)) )
+    K1 <- K0 + dK
+    L1 <- L0 + dL
+    Y1 <- shock + Y0
+    capacity_change <- (K1/K0 - 1)*100  # capacity change (per cent)
+    labour_change <- (L1/L0 - 1)*100    # labour change (per cent)
+    # pi0 <- Y0 - (K0*r_q + L0*w_q)
+    # pi1 <- Y1 - (K1*r_q + L1*w_q)
+    # d_pi <- shock - (dK*r_q + dL*w_q)
+    delta <- rbind(capacity_change, labour_change)
+    print(delta)
+    # check1 <- round(B*A0*K1^beta*L1^(alpha)) == round(Y0+shock)
+    check2 <- round((alpha*A0*B*K0^beta*L0^(alpha-1)*L0)) == round(Y0*alpha)
+    check3 <- round(B*A0*K0^beta*L0^(alpha)) == round(Y0)
+    if (!(check2 & check3)) {
+      print('Warning: internal checks not satisfied, please check results carefully')
+    }
+    print(paste('Shock size:', round(shock/Y0*100,2), '% of production'))
+    result <- list(
+      K0 = K0,
+      K1 = K1,
+      L0 = L0,
+      L1 = L1,
+      dL = dL,
+      dK = dK,
+      Y0 = Y0,
+      Y1 = Y0 + shock,
+      w = w,
+      r = r,
+      r_q = r_q,
+      w_q = w_q,
+      delta = delta,
+      w_r = w_r
+    )
+  } else {
+    result <- NA
+  }
+  data[["CobbDouglasCalc"]] <- result
+  saveit(data, where='data_output/supply_analysis/', string=data$category)
+  return(data)
+}
+calcTax <- function(data, logform = TRUE, trend = TRUE) {
+  if (!is.null(data$tax)) {
+    tax_data <- data$tax %>%
+      ungroup() %>%
+      select(date, value_sa) %>%
+      rename("tax"="value_sa") %>%
+      left_join(data$prodRUB %>%
+                  select(date, value_sa) %>%
+                  rename("prod"="value_sa") %>%
+                  group_by(date=yearquarter(date)) %>%
+                  summarize(prod = sum(prod, na.rm=TRUE)), by='date') %>%
+      as_tsibble() %>%
+      drop_na()
+    y <- tax_data$prod
+    taxes <- tax_data$tax
+    shock_size <- data$cntft_volume_rub*10^6 / last(data$prodRUB$cpi)
+    shock <- shock_size/last(y)*100
+    # shock_size <- as.numeric(shock[1])
+    # shock_type <- shock[2]
+    # if (shock_type=='unit') {
+    #   shock <- shock_size/last(y)*100 # in percentage points
+    #   shock_size <- shock_size        # in units
+    # } else {
+    #   shock <- shock_size             # in percentage points
+    #   shock_size <- shock*last(y)/100 # in units
+    # }
+    # if (logform) {
+    #   if (trend) {
+    #     m <- lm(diff(log(taxes)) ~ diff(log(y)) + diff(lag(log(y))))
+    #     summary(m)
+    #   } else {
+    #     m <- lm(log(taxes) ~ lag(log(y)))
+    #   }
+    # } else {
+    #   if (trend) {
+    #     m <- lm(taxes ~ lag(y) + seq(1, length(y)))
+    #   } else {
+    #     m <- lm(taxes ~ lag(y))
+    #   }
+    # }
+    m <- lm(diff(log(taxes)) ~ diff(log(y)) + diff(lag(log(y))))
+    # m <- lm(diff(taxes) ~ diff(y) + diff(lag(y)))
+    
+    print(summary(m))
+    # check_df <- cbind(m$model, fitted(m), seq(1, nrow(m$model)))
+    # if (trend) {
+    #   names(check_df) <- c('tax', 'y', 'trend', 'fit', 'n')
+    # } else {
+    #   names(check_df) <- c('tax', 'y', 'fit', 'n')
+    # }
+    check_df <- cbind(data.frame(m$model[,1]), fitted(m), seq(1, nrow(m$model)))
+    names(check_df) <- c('dtax', 'fit', 'n')
+    g <- check_df %>%
+      select(n, dtax, fit) %>%
+      pivot_longer(-n) %>%
+      ggplot() +
+      geom_line(aes(x=n, y=value, group=name, col=name))
+    print(g)
+    # if (logform) {
+    #   tax_elast <- ( m %>% tidy() %>% pull(estimate) )[2]
+    #   tax_change_pct <- tax_elast*(shock/100)
+    #   tax_change = exp(last(log(tax_data$tax)) + tax_change_pct) - exp(last(log(tax_data$tax)))
+    # } else {
+    #   tax_elast <- ( m %>% tidy() %>% pull(estimate) )[2]
+    #   tax_change <- shock_size*tax_elast
+    # }
+    tax_elast <- sum(( m %>% tidy() %>% pull(estimate) )[2:3])
+    tax_change_pct <- tax_elast*(shock/100)
+    tax_change = (exp(last(log(tax_data$tax)) + tax_change_pct) - exp(last(log(tax_data$tax)))) * last(data$cpi$cpi)
+    annual <- tax_change*4
+    delta_tax <- rbind(shock_size, tax_change, tax_change/shock_size, annual)
+    result <- list(
+      delta_tax = delta_tax,
+      model = m,
+      tax_elast = tax_elast
+    )
+  } else {
+    result <- NA
+  }
+  data[["delta_tax"]] <- result
+  saveit(data, where='data_output/supply_analysis/', string=data$category)
+  return(data)
+}
+# attach plotting functions ----
+source('infl_dashboard_app/plots.R')

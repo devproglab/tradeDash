@@ -16,10 +16,16 @@ library(data.table)
 library(shinyjs)
 library(shinycssloaders)
 library(glue)
-
 options(scipen=999)
 shinyOptions(cache = cachem::cache_disk("./cache/"))
-upd <- file.info('df-10-znak.sqlite')$mtime
+select <- dplyr::select
+is_local <- Sys.getenv('SHINY_PORT') == ""
+if (is_local) {
+  extendFilePath <- '../'
+} else {
+  extendFilePath <- ''
+}
+upd <- file.info(paste0(extendFilePath, 'df-10-znak.sqlite'))$mtime
 
 
 options(spinner.color = "#006272")
@@ -123,7 +129,7 @@ sidebar <- dashboardSidebar(
     
     # Страница экспорта данных
     menuItem(
-      "Aгрегирование данных",
+      "Выгрузка данных",
       tabName = 'aggregate_data',
       icon = icon('globe')
     ),
@@ -137,8 +143,8 @@ sidebar <- dashboardSidebar(
                          width = "200px",
                          multiple = T
                        ),
-                       radioButtons("aggstrCheckbox", "Aгрегировать данные по странам",
-                                      c("да", "нет")),
+                       # radioButtons("aggstrCheckbox", "Aгрегировать данные по странам",
+                       #                c("да", "нет")),
                        radioButtons("codeCheckbox", "Выберите уровень группировки:",
                                     c("2 знака", "4 знака", "6 знаков")),
                        selectizeInput(
@@ -149,8 +155,8 @@ sidebar <- dashboardSidebar(
                          width = "200px",
                          multiple = T
                        ),
-                       radioButtons("aggcomCheckbox", "Aгрегировать данные по товарам",
-                                    c("да", "нет")),
+                       # radioButtons("aggcomCheckbox", "Aгрегировать данные по товарам",
+                       #              c("да", "нет")),
                        # radioButtons("addftsCheckbox", "Добавить ФТС данные к зеркальным",
                        #              c("да", "нет")),
                        actionButton(
@@ -302,7 +308,20 @@ body <- dashboardBody(tabItems(
   tabItem(
     tabName = "aggregate_data",
     
-    h2("Таблица, полученная из выбранных данных:"),
+    h2("Динамика внешней торговли") ,
+    tabsetPanel(type='tabs',
+                tabPanel("Стоимостные объемы", 
+                         plotlyOutput('stoim_CommCountrytradeHistoryPlots')
+                         ),
+                tabPanel("Физические объемы (основная ед. изм.)", 
+                         # plotlyOutput('netto_CommCountrytradeHistoryPlots')
+                         ),
+                tabPanel("Физические объемы (дополнительная ед. изм.)",
+                         # plotlyOutput('kol_CommCountrytradeHistoryPlots')
+                         )
+                
+    ),
+    h2("Результаты запроса:"),
     fluidRow(
       DT::dataTableOutput("aggTable")
     )
@@ -416,7 +435,7 @@ server <- function(input, output) {
   }
   
   con <-
-    dbConnect(RSQLite::SQLite(), "df-10-znak.sqlite")
+    dbConnect(RSQLite::SQLite(), paste0(extendFilePath, 'df-10-znak.sqlite'))
   df_FTS <- tbl(con, "fts")
   df <- tbl(con, "mirr")
   napr <- tbl(con, "napr")
@@ -1917,8 +1936,8 @@ server <- function(input, output) {
   observeEvent(input$btn_build_agg_report,
                {
                  
-                 # aggregate countries?
-                 y <- input$aggstrCheckbox 
+                 # # aggregate countries?
+                 # y <- input$aggstrCheckbox 
                  
                  # get country ids
                  quotedLstCNTR <- qq(input$strana_on_off) 
@@ -1934,7 +1953,7 @@ server <- function(input, output) {
                  commodity_id <- dbGetQuery(con, query)$id
                  
                  # aggregate tnveds?
-                 w <- input$aggcomCheckbox 
+                 # w <- input$aggcomCheckbox 
                  
                  # add fts?
                  # k <- input$addftsCheckbox
@@ -1944,22 +1963,22 @@ server <- function(input, output) {
                    filter(rlang::sym(paste0("TNVED", z)) %in% commodity_id) %>%
                    select(-TNVED4, -TNVED6, -TNVED2)
                  
-                 if (w=='да') {
-                   result <- result %>%
-                     group_by(PERIOD, STRANA, NAPR) %>%
-                     summarize(STOIM = sum(STOIM, na.rm=TRUE), 
-                               NETTO = sum(NETTO, na.rm=TRUE),
-                               KOL = sum(as.numeric(KOL), na.rm=TRUE), TNVED = quotedLstTN, EDIZM = EDIZM)
-                     
-                 }
+                 # if (w=='да') {
+                 #   result <- result %>%
+                 #     group_by(PERIOD, STRANA, NAPR) %>%
+                 #     summarize(STOIM = sum(STOIM, na.rm=TRUE), 
+                 #               NETTO = sum(NETTO, na.rm=TRUE),
+                 #               KOL = sum(as.numeric(KOL), na.rm=TRUE), TNVED = quotedLstTN, EDIZM = EDIZM)
+                 #     
+                 # }
                  
-                 if (y=='да') {
-                   result <- result %>%
-                     group_by(PERIOD, NAPR, TNVED) %>%
-                     summarize(STOIM = sum(STOIM, na.rm=TRUE), 
-                               NETTO = sum(NETTO, na.rm=TRUE),
-                               KOL = sum(as.numeric(KOL), na.rm=TRUE), STRANA = quotedLstCNTR, EDIZM = EDIZM)
-                 }
+                 # if (y=='да') {
+                 #   result <- result %>%
+                 #     group_by(PERIOD, NAPR, TNVED) %>%
+                 #     summarize(STOIM = sum(STOIM, na.rm=TRUE), 
+                 #               NETTO = sum(NETTO, na.rm=TRUE),
+                 #               KOL = sum(as.numeric(KOL), na.rm=TRUE), STRANA = quotedLstCNTR, EDIZM = EDIZM)
+                 # }
 
                 countryIds <- strana %>%
                   collect()
@@ -1971,7 +1990,143 @@ server <- function(input, output) {
                   collect()
                 
                 result <- result %>%
-                  collect() %>%
+                  collect() 
+                result <- result %>%
+                  left_join(countryIds, by=c("STRANA" = "id"), suffix=c("", ".x")) %>%
+                  select(-STRANA) %>%
+                  rename("STRANA" = "STRANA.x") %>%
+                  mutate(PERIOD = as.Date(PERIOD))
+                
+                output$stoim_CommCountrytradeHistoryPlots <- renderPlotly({
+
+                  # code_col = rlang::sym(paste0("TNVED", y))
+
+                  CommCountrytradeHistory <- result %>%
+                    group_by(PERIOD, NAPR, STRANA) %>%
+                    summarise(STOIM = sum(STOIM, na.rm = TRUE))
+
+
+                  CommCountrytradeHistoryPlotEx <-
+                    CommCountrytradeHistory %>%
+                    filter(NAPR == ex_id) %>%
+                    ggplot() +
+                    geom_line(aes(
+                      x = PERIOD,
+                      y = STOIM/ 10^6,
+                      group = STRANA,
+                      col = STRANA,
+                      text = paste0(
+                        'Экспорт, ',
+                        STRANA,
+                        ', ',
+                        PERIOD,
+                        ': ',
+                        round(STOIM / 10 ^ 6, 1),
+                        ' млн'
+                      )
+                    )) +
+                    scale_color_discrete(name = '') +
+                    geom_line(
+                      data = CommCountrytradeHistory %>%
+                        filter(NAPR == ex_id) %>%
+                        group_by(PERIOD) %>%
+                        summarise(TOTAL = sum(STOIM, na.rm = TRUE)),
+                      aes(
+                        x = PERIOD,
+                        y = TOTAL / 10 ^ 6,
+                        group = 9999,
+                        col = 'blue',
+                        linetype = 'total',
+                        text = paste0(
+                          'Суммарный экспорт, ',
+                          PERIOD,
+                          ': ',
+                          round(TOTAL / 10 ^ 6, 1),
+                          ' млн'
+                        )
+                      )
+                    ) +
+                    scale_linetype_manual(name = '', values = c('total' = "dashed")) +
+                    xlab('') +
+                    ylab('млн $') +
+                    theme(legend.position = 'none')
+
+                  CommCountrytradeHistoryPlotEx <-
+                    ggplotly(CommCountrytradeHistoryPlotEx, tooltip = 'text') %>%
+                    config(displayModeBar = F, locale = 'ru') %>% layout(plot_bgcolor  = "rgba(0, 0, 0, 0)", paper_bgcolor = "rgba(0, 0, 0, 0)") %>%
+                    layout(legend = list(
+                      orientation = "h",
+                      x = 0.3,
+                      y = -0.1
+                    ))
+
+
+                  # 3.3.2 импорт
+
+                  CommCountrytradeHistoryPlotIm <-
+                    CommCountrytradeHistory %>%
+                    filter(NAPR == im_id) %>%
+                    ggplot() +
+                    geom_line(aes(
+                      x = PERIOD,
+                      y = STOIM/10^6,
+                      group = STRANA,
+                      col = STRANA,
+                      text = paste0(
+                        'Импорт, ',
+                        STRANA,
+                        ', ',
+                        PERIOD,
+                        ': ',
+                        round(STOIM / 10 ^ 6, 1),
+                        ' млн'
+                      )
+                    )) +
+                    scale_color_discrete(name = '') +
+                    geom_line(
+                      data = CommCountrytradeHistory %>%
+                        filter(NAPR == im_id) %>%
+                        group_by(PERIOD) %>%
+                        summarise(TOTAL = sum(STOIM, na.rm = TRUE)),
+                      aes(
+                        x = PERIOD,
+                        y = TOTAL / 10 ^ 6,
+                        group = 999999,
+                        col = 'blue',
+                        linetype = 'total',
+                        text = paste0(
+                          'Суммарный импорт, ',
+                          PERIOD,
+                          ': ',
+                          round(TOTAL / 10 ^ 6, 1),
+                          ' млн'
+                        )
+                      )
+                    ) +
+                    scale_linetype_manual(name = '', values = c('total' = "dashed")) +
+                    xlab('') +
+                    ylab('млн $') +
+                    theme(legend.position = 'none')
+
+                  CommCountrytradeHistoryPlotIm <-
+                    ggplotly(CommCountrytradeHistoryPlotIm, tooltip = 'text') %>%
+                    config(displayModeBar = F, locale = 'ru') %>% layout(plot_bgcolor  = "rgba(0, 0, 0, 0)", paper_bgcolor = "rgba(0, 0, 0, 0)") %>%
+                    layout(legend = list(
+                      orientation = "h",
+                      x = 0.3,
+                      y = -0.1
+                    ))
+
+
+                  # 3.3.3 суммарное преобразование получившихся графиков
+
+                  fig <- subplot(CommCountrytradeHistoryPlotEx, CommCountrytradeHistoryPlotIm, nrows=2, margin = 0.1) %>% layout(annotations = list(
+                    list(x = 0.1 , y = 1.05, text = "Экспорт", showarrow = F, xref='paper', yref='paper'),
+                    list(x = 0.1 , y = 0.5, text = "Импорт", showarrow = F, xref='paper', yref='paper')))
+                  fig
+                })
+                
+                result <- result %>%
                   select(PERIOD, STOIM, NETTO, KOL, NAPR, STRANA, TNVED, EDIZM) %>%
                   left_join(naprIds, by=c("NAPR" = "id"), suffix=c("", ".x")) %>%
                   ungroup() %>%
@@ -1979,50 +2134,51 @@ server <- function(input, output) {
                   mutate(PERIOD = as.Date(PERIOD)) %>%
                   rename("NAPR" = "NAPR.x")
                 
-                if (w=='нет') {
-                  result <- result %>%
-                    left_join(tnvedIds, by=c("TNVED" = "id"), suffix=c("", ".x")) %>%
-                    select(-TNVED) %>%
-                    rename("TNVED" = "TNVED.x") %>%
-                    left_join(edizmIds, by=c("EDIZM" = "id"), suffix=c("", ".x")) %>%
-                    select(-EDIZM) %>%
-                    rename("EDIZM" = "EDIZM.x")
-                }
+                # if (w=='нет') {
+                result <- result %>%
+                  left_join(tnvedIds, by=c("TNVED" = "id"), suffix=c("", ".x")) %>%
+                  select(-TNVED) %>%
+                  rename("TNVED" = "TNVED.x") %>%
+                  left_join(edizmIds, by=c("EDIZM" = "id"), suffix=c("", ".x")) %>%
+                  select(-EDIZM) %>%
+                  rename("EDIZM" = "EDIZM.x")
+                # }
                 
-                if (y=='нет') {
-                  result <- result %>%
-                    left_join(countryIds, by=c("STRANA" = "id"), suffix=c("", ".x")) %>%
-                    select(-STRANA) %>%
-                    rename("STRANA" = "STRANA.x")
-                  flags <- data.frame(
-                    STRANA = unique(result$STRANA),
-                    FLAG = paste0(
-                      '<img src="https://cdn.rawgit.com/lipis/flag-icon-css/master/flags/4x3/',
-                      tolower(unique(result$STRANA)), '.svg" height=15>')
-                  )
-                  result <- result %>%
-                    left_join(flags)
-                  result <- result %>%
-                    select(STRANA, FLAG, PERIOD, NAPR, TNVED, STOIM, NETTO, KOL, EDIZM)
-                } else {
-                  result <- result %>%
-                    select(STRANA, PERIOD, NAPR, TNVED, STOIM, NETTO, KOL, EDIZM)
-                }
+                # if (y=='нет') {
+                flags <- data.frame(
+                  STRANA = unique(result$STRANA),
+                  FLAG = paste0(
+                    '<img src="https://cdn.rawgit.com/lipis/flag-icon-css/master/flags/4x3/',
+                    tolower(unique(result$STRANA)), '.svg" height=15>')
+                )
+                result <- result %>%
+                  left_join(flags)
+                result <- result %>%
+                  select(STRANA, FLAG, PERIOD, NAPR, TNVED, STOIM, NETTO, KOL)
+                # } else {
+                #   result <- result %>%
+                #     select(STRANA, PERIOD, NAPR, TNVED, STOIM, NETTO, KOL, EDIZM)
+                # }
                 
-
-                
-                
-                  
                 output$aggTable = DT::renderDataTable(
                   result, extensions = 'Buttons', escape = FALSE,
-                            options = list(scrollX = TRUE,
-                                           scrollY = FALSE
-                                           , pageLength = 20
-                                           , dom = 'Blfrtip'
-                                           , buttons = 'excel'
-                                           , columnDefs = list(list(className = 'dt-center', targets = "_all"))
-                            ), server = F
+                  options = list(scrollX = TRUE,
+                                 scrollY = FALSE
+                                 , pageLength = 20
+                                 , dom = 'Blfrtip'
+                                 , buttons = 'excel'
+                                 , columnDefs = list(list(className = 'dt-center', targets = "_all"))
+                  ), server = F
                 )
+                
+                
+                
+                
+                
+                
+                
+                
+                
 
                })
 

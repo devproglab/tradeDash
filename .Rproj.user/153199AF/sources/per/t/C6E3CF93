@@ -1,26 +1,26 @@
 {
-    "id": "355788E0",
-    "path": "D:/YandexDisk/Mike Zinovenkov/DashBoard/app.R",
-    "project_path": "app.R",
+    "id": "C6E3CF93",
+    "path": "D:/YandexDisk/Ilya Gulenkov/Dashboard/functions.R",
+    "project_path": null,
     "type": "r_source",
-    "hash": "0",
+    "hash": "1651242238",
     "contents": "",
     "dirty": false,
-    "created": 1661176269305.0,
+    "created": 1662733970008.0,
     "source_on_save": false,
     "relative_order": 4,
     "properties": {
         "source_window_id": "",
         "Source": "Source",
-        "cursorPosition": "123,26",
-        "scrollLine": "106"
+        "cursorPosition": "1065,0",
+        "scrollLine": "1054"
     },
     "folds": "",
-    "lastKnownWriteTime": 1662310513,
+    "lastKnownWriteTime": 1662544063,
     "encoding": "UTF-8",
     "collab_server": "",
     "source_window": "",
-    "last_content_update": 1662310513327,
+    "last_content_update": 1662544063,
     "read_only": false,
     "read_only_alternatives": []
 }
